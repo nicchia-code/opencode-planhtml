@@ -44,34 +44,7 @@ export function builtBinaryRelativePath(platform = process.platform, arch = proc
 }
 
 function sanitizeCliArgs(argv) {
-  const sanitized = []
-  let insideSystemReminder = false
-
-  for (const rawArg of argv) {
-    const arg = String(rawArg)
-
-    if (arg === "--") {
-      continue
-    }
-
-    if (insideSystemReminder) {
-      if (arg.includes("</system-reminder>")) {
-        insideSystemReminder = false
-      }
-      continue
-    }
-
-    if (arg.startsWith("<system-reminder>") || arg.startsWith("--<system-reminder>")) {
-      if (!arg.includes("</system-reminder>")) {
-        insideSystemReminder = true
-      }
-      continue
-    }
-
-    sanitized.push(arg)
-  }
-
-  return sanitized
+  return argv.map(String).filter((arg) => arg !== "--")
 }
 
 export function parseCliArgs(argv) {

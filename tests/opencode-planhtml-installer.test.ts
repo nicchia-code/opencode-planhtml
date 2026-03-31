@@ -24,19 +24,8 @@ describe("opencode plan HTML installer helpers", () => {
     expect(parsed.dryRun).toBe(true)
   })
 
-  it("ignores a leading bun separator and synthetic system reminders", () => {
-    const parsed = parseCliArgs([
-      "--",
-      "--link-name",
-      "opencode",
-      "--<system-reminder>",
-      "Your",
-      "operational",
-      "mode",
-      "has",
-      "changed",
-      "</system-reminder>",
-    ])
+  it("ignores a leading bun separator", () => {
+    const parsed = parseCliArgs(["--", "--link-name", "opencode"])
 
     expect(parsed.command).toBe("install")
     expect(parsed.linkName).toBe("opencode")

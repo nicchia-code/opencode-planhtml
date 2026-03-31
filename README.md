@@ -24,8 +24,6 @@ bun install -g github:nicchia-code/opencode-planhtml
 opencode-planhtml --link-name opencode
 ```
 
-If your shell or runner forwards a literal `--`, the installer ignores it, so `bunx github:nicchia-code/opencode-planhtml -- --link-name opencode` also works.
-
 By default this will:
 
 - clone the pinned upstream OpenCode repo
