@@ -1,0 +1,835 @@
+diff --git a/packages/opencode/package.json b/packages/opencode/package.json
+index c5eb922..5dc3bce 100644
+--- a/packages/opencode/package.json
++++ b/packages/opencode/package.json
+@@ -129,6 +129,7 @@
+     "hono-openapi": "catalog:",
+     "ignore": "7.0.5",
+     "jsonc-parser": "3.3.1",
++    "marked": "catalog:",
+     "mime-types": "3.0.2",
+     "minimatch": "10.0.3",
+     "open": "10.1.2",
+
+diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
+index 622537e..48d766a 100644
+--- a/packages/opencode/src/agent/agent.ts
++++ b/packages/opencode/src/agent/agent.ts
+@@ -127,6 +127,7 @@ export namespace Agent {
+                 Permission.fromConfig({
+                   question: "allow",
+                   plan_exit: "allow",
++                  todowrite: "allow",
+                   external_directory: {
+                     [path.join(Global.Path.data, "plans", "*")]: "allow",
+                   },
+
+diff --git a/packages/opencode/src/flag/flag.ts b/packages/opencode/src/flag/flag.ts
+index 0c55187..12681e9 100644
+--- a/packages/opencode/src/flag/flag.ts
++++ b/packages/opencode/src/flag/flag.ts
+@@ -24,6 +24,7 @@ export namespace Flag {
+   export const OPENCODE_PERMISSION = process.env["OPENCODE_PERMISSION"]
+   export const OPENCODE_DISABLE_DEFAULT_PLUGINS = truthy("OPENCODE_DISABLE_DEFAULT_PLUGINS")
+   export const OPENCODE_DISABLE_LSP_DOWNLOAD = truthy("OPENCODE_DISABLE_LSP_DOWNLOAD")
++  export const OPENCODE_DISABLE_PLAN_HTML_AUTO_OPEN = truthy("OPENCODE_DISABLE_PLAN_HTML_AUTO_OPEN")
+   export const OPENCODE_ENABLE_EXPERIMENTAL_MODELS = truthy("OPENCODE_ENABLE_EXPERIMENTAL_MODELS")
+   export const OPENCODE_DISABLE_AUTOCOMPACT = truthy("OPENCODE_DISABLE_AUTOCOMPACT")
+   export const OPENCODE_DISABLE_MODELS_FETCH = truthy("OPENCODE_DISABLE_MODELS_FETCH")
+
+diff --git a/packages/opencode/src/session/index.ts b/packages/opencode/src/session/index.ts
+index a379cd2..c1a3b84 100644
+--- a/packages/opencode/src/session/index.ts
++++ b/packages/opencode/src/session/index.ts
+@@ -355,6 +355,10 @@ export namespace Session {
+     return path.join(base, [input.time.created, input.slug].join("-") + ".md")
+   }
+ 
++  export function planHtml(input: { slug: string; time: { created: number } }) {
++    return plan(input).replace(/\.md$/, ".html")
++  }
++
+   export const get = fn(SessionID.zod, async (id) => {
+     const row = Database.use((db) => db.select().from(SessionTable).where(eq(SessionTable.id, id)).get())
+     if (!row) throw new NotFoundError({ message: `Session not found: ${id}` })
+
+diff --git a/packages/opencode/src/session/plan-html.ts b/packages/opencode/src/session/plan-html.ts
+new file mode 100644
+index 0000000..7de4856
+--- /dev/null
++++ b/packages/opencode/src/session/plan-html.ts
+@@ -0,0 +1,437 @@
++import fs from "node:fs/promises"
++import { createHash } from "node:crypto"
++import { release } from "node:os"
++import path from "node:path"
++import { pathToFileURL } from "node:url"
++import { marked, type Tokens } from "marked"
++import open from "open"
++
++import { Flag } from "@/flag/flag"
++import { PartID, type MessageID, type SessionID } from "@/session/schema"
++import { Process } from "@/util/process"
++import { which } from "@/util/which"
++import { Session } from "./index"
++import type { MessageV2 } from "./message-v2"
++
++type Section = {
++  level: number
++  title: string
++  id: string
++  body: string
++}
++
++const SUMMARY_EXCLUDED_TITLES = new Set([
++  "goal",
++  "plan rationale",
++  "actions",
++  "verification",
++  "risks",
++  "risk",
++  "assumptions",
++  "open questions",
++  "questions",
++  "summary",
++  "summary table",
++  "plan summary",
++])
++
++const RENDER_OMITTED_TITLES = new Set(["summary", "summary table", "plan summary"])
++const SYSTEM_REMINDER_PATTERN = /<system-reminder>[\s\S]*?<\/system-reminder>/gi
++const openedPlanHashes = new Map<SessionID, string>()
++const announcedPlanHashes = new Map<SessionID, string>()
++
++function escapeHtml(value: string): string {
++  return value
++    .replace(/&/g, "&amp;")
++    .replace(/</g, "&lt;")
++    .replace(/>/g, "&gt;")
++    .replace(/\"/g, "&quot;")
++    .replace(/'/g, "&#39;")
++}
++
++function slugify(value: string): string {
++  const slug = value
++    .toLowerCase()
++    .replace(/[^a-z0-9]+/g, "-")
++    .replace(/^-+|-+$/g, "")
++
++  return slug || "section"
++}
++
++function uniqueId(input: string, seen: Map<string, number>): string {
++  const base = slugify(input)
++  const count = seen.get(base) ?? 0
++  seen.set(base, count + 1)
++  if (count === 0) return base
++  return `${base}-${count + 1}`
++}
++
++function paragraphs(value: string): string[] {
++  return value
++    .split(/\n\s*\n/g)
++    .map((item) => item.trim())
++    .filter(Boolean)
++    .map((item) => item.replace(/^[*-]\s+/gm, "").replace(/^\d+\.\s+/gm, "").trim())
++}
++
++function stripMarkdown(value: string): string {
++  return value
++    .replace(/`([^`]+)`/g, "$1")
++    .replace(/\*\*([^*]+)\*\*/g, "$1")
++    .replace(/__([^_]+)__/g, "$1")
++    .replace(/^#+\s+/gm, "")
++    .replace(/^>\s?/gm, "")
++    .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
++    .trim()
++}
++
++function extractLabeledValue(body: string, label: string): string | undefined {
++  const match = body.match(new RegExp(`^${label}:\\s*(.+)$`, "im"))
++  const value = match?.[1]?.trim()
++  return value ? stripMarkdown(value) : undefined
++}
++
++function stripSystemReminders(value: string): string {
++  return value.replace(SYSTEM_REMINDER_PATTERN, "").trim()
++}
++
++function normalizePlanMarkdown(markdown: string): string {
++  return stripSystemReminders(markdown).trim()
++}
++
++function renderInline(value: string): string {
++  return escapeHtml(value).replace(/`([^`]+)`/g, "<code>$1</code>")
++}
++
++function renderMarkdownFragment(markdown: string): string {
++  const cleaned = stripSystemReminders(markdown)
++  if (!cleaned) return ""
++
++  const renderer = new marked.Renderer()
++  renderer.link = ({ href, title, text }: Tokens.Link) => {
++    const safeHref = escapeHtml(href)
++    const titleAttr = title ? ` title="${escapeHtml(title)}"` : ""
++    return `<a href="${safeHref}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`
++  }
++
++  const rendered = marked(cleaned, {
++    gfm: true,
++    breaks: false,
++    renderer,
++  })
++
++  if (typeof rendered !== "string") {
++    throw new Error("Unexpected async markdown render")
++  }
++
++  return rendered
++}
++
++function parseSections(markdown: string): { title: string; lead: string; sections: Section[] } {
++  const lines = markdown.split(/\r?\n/)
++  const seen = new Map<string, number>()
++  let title = "Plan"
++  const lead: string[] = []
++  const sections: Section[] = []
++  let current: Section | undefined
++
++  const pushCurrent = () => {
++    if (!current) return
++    current.body = current.body.trim()
++    sections.push(current)
++    current = undefined
++  }
++
++  for (const line of lines) {
++    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/)
++    if (headingMatch) {
++      const level = headingMatch[1].length
++      const headingTitle = headingMatch[2].trim()
++      if (level === 1 && title === "Plan" && !SUMMARY_EXCLUDED_TITLES.has(headingTitle.toLowerCase())) {
++        title = headingTitle
++      }
++      pushCurrent()
++      current = {
++        level,
++        title: headingTitle,
++        id: uniqueId(headingTitle, seen),
++        body: "",
++      }
++      continue
++    }
++
++    if (current) current.body += `${line}\n`
++    else lead.push(line)
++  }
++
++  pushCurrent()
++
++  return {
++    title,
++    lead: lead.join("\n").trim(),
++    sections,
++  }
++}
++
++function stepSections(sections: Section[]): Section[] {
++  const explicit = sections.filter((section) => section.level === 2 && /^(step|phase)\b/i.test(section.title))
++  if (explicit.length) return explicit
++
++  const inferred = sections.filter(
++    (section) => section.level === 2 && !SUMMARY_EXCLUDED_TITLES.has(section.title.trim().toLowerCase()),
++  )
++  if (inferred.length) return inferred
++
++  return sections.filter((section) => section.level === 3)
++}
++
++function summarizeSection(section: Section): { action: string; why: string } {
++  const action = extractLabeledValue(section.body, "What") ?? paragraphs(section.body)[0] ?? section.title
++  const why = extractLabeledValue(section.body, "Why") ?? paragraphs(section.body)[1] ?? "See section details"
++  return {
++    action: stripMarkdown(action),
++    why: stripMarkdown(why),
++  }
++}
++
++function fallbackTitle(sourcePath: string): string {
++  const base = path.basename(sourcePath, path.extname(sourcePath)).replace(/^\d+-/, "")
++  const normalized = base.replace(/[-_]+/g, " ").trim()
++  return normalized || "Plan"
++}
++
++function htmlTemplate(input: {
++  title: string
++  leadHtml: string
++  sections: Section[]
++  summaryRows: Array<{ title: string; id: string; action: string; why: string }>
++  sourcePath: string
++  generatedAt: string
++}) {
++  const sectionHtml = input.sections
++    .filter((section) => !RENDER_OMITTED_TITLES.has(section.title.trim().toLowerCase()))
++    .map((section) => {
++      const level = Math.min(Math.max(section.level, 2), 4)
++      return [
++        `<section class="plan-section" id="${section.id}">`,
++        `<h${level}><a href="#${section.id}">${renderInline(section.title)}</a></h${level}>`,
++        renderMarkdownFragment(section.body),
++        `</section>`,
++      ].join("\n")
++    })
++    .join("\n")
++
++  const summaryTable = input.summaryRows.length
++    ? [
++        `<section class="plan-section" id="plan-summary">`,
++        `<h2><a href="#plan-summary">Plan Summary</a></h2>`,
++        `<table>`,
++        `<thead><tr><th>Step</th><th>Action</th><th>Why</th><th>Link</th></tr></thead>`,
++        `<tbody>`,
++        ...input.summaryRows.map(
++          (row) =>
++            `<tr><td>${renderInline(row.title)}</td><td>${renderInline(row.action)}</td><td>${renderInline(row.why)}</td><td><a href="#${row.id}">Jump</a></td></tr>`,
++        ),
++        `</tbody>`,
++        `</table>`,
++        `</section>`,
++      ].join("\n")
++    : ""
++
++  return [
++    "<!doctype html>",
++    '<html lang="en">',
++    "<head>",
++    '  <meta charset="utf-8">',
++    '  <meta name="viewport" content="width=device-width, initial-scale=1">',
++    `  <title>${escapeHtml(input.title)}</title>`,
++    "  <style>",
++    "    :root { color-scheme: light dark; --bg: #f6f1e8; --panel: #fffdf9; --text: #1f1a14; --muted: #6f6558; --border: #d7c8b2; --accent: #8a4b11; --accent-soft: #f2dec6; --code: #f0e6d8; }",
++    "    @media (prefers-color-scheme: dark) { :root { --bg: #181511; --panel: #211b15; --text: #f5eee5; --muted: #c6b39a; --border: #4a3b2b; --accent: #f0a35a; --accent-soft: #33261a; --code: #2a221a; } }",
++    "    * { box-sizing: border-box; }",
++    "    body { margin: 0; font-family: Georgia, 'Times New Roman', serif; background: linear-gradient(180deg, var(--bg), color-mix(in srgb, var(--bg) 70%, white 30%)); color: var(--text); }",
++    "    main { max-width: 980px; margin: 0 auto; padding: 40px 20px 72px; }",
++    "    header { margin-bottom: 32px; padding: 24px 28px; border: 1px solid var(--border); border-radius: 20px; background: var(--panel); box-shadow: 0 16px 50px rgba(0, 0, 0, 0.08); }",
++    "    h1, h2, h3, h4 { font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, serif; line-height: 1.15; }",
++    "    h1 { margin: 0 0 12px; font-size: clamp(2rem, 3vw, 3rem); }",
++    "    h2 { margin: 0 0 14px; font-size: 1.6rem; }",
++    "    h3 { margin: 0 0 12px; font-size: 1.2rem; }",
++    "    p, li { line-height: 1.65; }",
++    "    code { font-family: 'SFMono-Regular', 'Consolas', monospace; background: var(--code); padding: 0.15rem 0.35rem; border-radius: 6px; }",
++    "    pre { overflow-x: auto; padding: 16px; border-radius: 14px; background: var(--code); border: 1px solid var(--border); }",
++    "    pre code { padding: 0; background: transparent; }",
++    "    a { color: var(--accent); }",
++    "    .meta { color: var(--muted); font-size: 0.95rem; }",
++    "    .lead { margin-top: 18px; }",
++    "    .plan-section { margin-top: 24px; padding: 24px 28px; border: 1px solid var(--border); border-radius: 20px; background: var(--panel); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05); }",
++    "    table { width: 100%; border-collapse: collapse; margin-top: 12px; }",
++    "    th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }",
++    "    th { font-size: 0.9rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }",
++    "    ul, ol { padding-left: 1.5rem; }",
++    "    @media (max-width: 720px) { main { padding: 20px 14px 40px; } header, .plan-section { padding: 18px; } table, thead, tbody, tr, th, td { display: block; } th { padding-bottom: 0; } td { padding-top: 6px; } }",
++    "  </style>",
++    "</head>",
++    "<body>",
++    "  <main>",
++    "    <header>",
++    `      <p class="meta">Generated ${escapeHtml(input.generatedAt)}</p>`,
++    `      <h1>${renderInline(input.title)}</h1>`,
++    `      <p class="meta">Source plan: <code>${escapeHtml(input.sourcePath)}</code></p>`,
++    input.leadHtml ? `      <div class="lead">${input.leadHtml}</div>` : "",
++    "    </header>",
++    summaryTable,
++    sectionHtml,
++    "  </main>",
++    "</body>",
++    "</html>",
++  ].join("\n")
++}
++
++function isWslEnvironment(env = process.env): boolean {
++  return process.platform === "linux" && (release().includes("WSL") || Boolean(env["WSL_DISTRO_NAME"]))
++}
++
++export function hasTodoWriteCompletion(parts: MessageV2.Part[]): boolean {
++  return parts.some((part) => part.type === "tool" && part.tool === "todowrite" && part.state.status === "completed")
++}
++
++export function markdownFromParts(parts: MessageV2.Part[]): string {
++  return parts
++    .filter((part): part is MessageV2.TextPart => part.type === "text" && !part.synthetic && !part.ignored)
++    .map((part) => normalizePlanMarkdown(part.text))
++    .map((part) => part.trim())
++    .filter(Boolean)
++    .join("\n\n")
++    .trim()
++}
++
++export function isPlanReadyForOpen(markdown: string): boolean {
++  const normalized = normalizePlanMarkdown(markdown)
++  if (!normalized) return false
++
++  return /^#\s+Goal\b/im.test(normalized) && /^#\s+Actions\b/im.test(normalized) && /^##\s+(Step|Phase)\b/im.test(normalized)
++}
++
++function planHash(markdown: string): string {
++  return createHash("sha256").update(normalizePlanMarkdown(markdown)).digest("hex")
++}
++
++export function shouldAttachPlanHtml(sessionID: SessionID, hash: string, ready: boolean): boolean {
++  if (!ready) return false
++  const previous = announcedPlanHashes.get(sessionID)
++  if (previous === hash) return false
++  announcedPlanHashes.set(sessionID, hash)
++  return true
++}
++
++export function renderPlanHtml(markdown: string, sourcePath: string): string {
++  const parsed = parseSections(markdown)
++  const summaryRows = stepSections(parsed.sections).map((section) => {
++    const summary = summarizeSection(section)
++    return {
++      title: section.title,
++      id: section.id,
++      action: summary.action,
++      why: summary.why,
++    }
++  })
++
++  return htmlTemplate({
++    title: parsed.title === "Plan" ? fallbackTitle(sourcePath) : parsed.title,
++    leadHtml: parsed.lead ? renderMarkdownFragment(parsed.lead) : "",
++    sections: parsed.sections,
++    summaryRows,
++    sourcePath,
++    generatedAt: new Date().toLocaleString(),
++  })
++}
++
++export function htmlAttachment(input: { htmlPath: string; messageID: MessageID; sessionID: SessionID }): MessageV2.FilePart {
++  return {
++    id: PartID.ascending(),
++    messageID: input.messageID,
++    sessionID: input.sessionID,
++    type: "file",
++    filename: path.basename(input.htmlPath),
++    mime: "text/html",
++    url: pathToFileURL(input.htmlPath).href,
++  }
++}
++
++async function openHtmlFile(htmlPath: string): Promise<boolean> {
++  if (Flag.OPENCODE_DISABLE_PLAN_HTML_AUTO_OPEN || Boolean(process.env["CI"])) return false
++
++  if (isWslEnvironment()) {
++    if (which("wslview")) {
++      const result = await Process.run(["wslview", htmlPath], { nothrow: true })
++      if (result.code === 0) return true
++    }
++
++    if (which("wslpath") && which("powershell.exe")) {
++      const windowsPath = await Process.text(["wslpath", "-w", htmlPath], { nothrow: true })
++      const target = windowsPath.text.trim()
++      if (windowsPath.code === 0 && target) {
++        const command = `Start-Process -FilePath '${target.replace(/'/g, "''")}'`
++        const result = await Process.run(["powershell.exe", "-NoProfile", "-Command", command], { nothrow: true })
++        if (result.code === 0) return true
++      }
++    }
++  }
++
++  try {
++    await open(htmlPath)
++    return true
++  } catch {
++    return false
++  }
++}
++
++async function writeHtml(htmlPath: string, html: string) {
++  await fs.mkdir(path.dirname(htmlPath), { recursive: true })
++  await fs.writeFile(htmlPath, html, "utf8")
++}
++
++export async function renderPlanArtifacts(input: {
++  session: Session.Info
++  markdown: string
++  persistMarkdown?: boolean
++  autoOpen?: boolean
++}) {
++  const markdownPath = Session.plan(input.session)
++  const htmlPath = Session.planHtml(input.session)
++  const hash = planHash(input.markdown)
++  const ready = isPlanReadyForOpen(input.markdown)
++
++  if (input.persistMarkdown ?? true) {
++    await fs.mkdir(path.dirname(markdownPath), { recursive: true })
++    await fs.writeFile(markdownPath, input.markdown, "utf8")
++  }
++
++  const html = renderPlanHtml(input.markdown, markdownPath)
++  await writeHtml(htmlPath, html)
++
++  let opened = false
++  if (input.autoOpen !== false && ready && openedPlanHashes.get(input.session.id) !== hash) {
++    opened = await openHtmlFile(htmlPath)
++    if (opened) openedPlanHashes.set(input.session.id, hash)
++  }
++
++  return {
++    markdownPath,
++    htmlPath,
++    hash,
++    ready,
++    opened,
++  }
++}
++
++export async function renderExistingPlanArtifacts(input: { session: Session.Info; autoOpen?: boolean }) {
++  const markdownPath = Session.plan(input.session)
++  const markdown = await fs.readFile(markdownPath, "utf8")
++  return renderPlanArtifacts({
++    session: input.session,
++    markdown,
++    persistMarkdown: false,
++    autoOpen: input.autoOpen,
++  })
++}
+
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index 84ea766..0750e4b 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -12,9 +12,11 @@ import type { Provider } from "@/provider/provider"
+ import { LLM } from "./llm"
+ import { Config } from "@/config/config"
+ import { SessionCompaction } from "./compaction"
++import { Flag } from "@/flag/flag"
+ import { Permission } from "@/permission"
+ import { Question } from "@/question"
+ import { PartID } from "./schema"
++import * as SessionPlanHtml from "./plan-html"
+ import type { SessionID, MessageID } from "./schema"
+ 
+ export namespace SessionProcessor {
+@@ -418,6 +420,35 @@ export namespace SessionProcessor {
+           }
+           input.assistantMessage.time.completed = Date.now()
+           await Session.updateMessage(input.assistantMessage)
++          if (
++            !Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE &&
++            input.assistantMessage.agent === "plan" &&
++            !input.assistantMessage.error
++          ) {
++            try {
++              const markdown = SessionPlanHtml.markdownFromParts(p)
++              if (markdown) {
++                const session = await Session.get(input.sessionID)
++                const artifacts = await SessionPlanHtml.renderPlanArtifacts({
++                  session,
++                  markdown,
++                })
++                if (SessionPlanHtml.shouldAttachPlanHtml(input.assistantMessage.sessionID, artifacts.hash, artifacts.ready)) {
++                  await Session.updatePart(
++                    SessionPlanHtml.htmlAttachment({
++                      htmlPath: artifacts.htmlPath,
++                      messageID: input.assistantMessage.id,
++                      sessionID: input.assistantMessage.sessionID,
++                    }),
++                  )
++                }
++              }
++            } catch (error) {
++              log.warn("plan html render failed", {
++                error: error instanceof Error ? error.message : String(error),
++              })
++            }
++          }
+           if (needsCompaction) return "compact"
+           if (blocked) return "stop"
+           if (input.assistantMessage.error) return "stop"
+
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index b3c3453..2b3b071 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -1510,6 +1510,36 @@ Goal: Write your final plan to the plan file (the only file you can edit).
+ - Include the paths of critical files to be modified
+ - Include a verification section describing how to test the changes end-to-end (run the code, use MCP tools, run tests)
+ 
++## TDD Todo Contract
++
++Before finalizing the plan, you MUST call \`todowrite\`.
++
++For implementation work, the todo list MUST include explicit TDD-oriented steps when applicable:
++1. confirm scope, files, and constraints
++2. identify existing tests or missing tests
++3. write or update failing tests first
++4. define or run the exact test command needed to confirm failure
++5. implement the minimal production change
++6. run tests to confirm success
++7. refactor or cleanup if needed
++8. provide execution handoff
++
++If the user provides pseudocode or a detailed implementation plan, preserve it faithfully.
++Do not silently rewrite the user's algorithm into a different one unless you explicitly call out the deviation and why it is necessary.
++
++The visible plan must match the todo list.
++Todos are the execution contract, not scratch notes.
++
++Structure the final plan so it can be rendered cleanly for the user:
++- start with \`# Goal\`
++- then \`# Plan Rationale\`
++- then \`# Actions\`
++- use \`## Step N: ...\` for each major step
++- in every major step include explicit \`What:\`, \`Why:\`, and \`Files/Tests:\` lines before the detailed bullets
++- keep the final summary concise enough that a rendered HTML view can generate anchors and a final summary table from those sections
++
++If the task is too small to require full TDD, say so explicitly and provide the lightest valid plan instead of forcing ceremony.
++
+ ### Phase 5: Call plan_exit tool
+ At the very end of your turn, once you have asked the user questions and are happy with your final plan file - you should always call plan_exit to indicate to the user that you are done planning.
+ This is critical - your turn should only end with either asking the user a question or calling plan_exit. Do not stop unless it's for these 2 reasons.
+
+diff --git a/packages/opencode/src/session/prompt/build-switch.txt b/packages/opencode/src/session/prompt/build-switch.txt
+index 3737b74..85546b1 100644
+--- a/packages/opencode/src/session/prompt/build-switch.txt
++++ b/packages/opencode/src/session/prompt/build-switch.txt
+@@ -1,5 +1,6 @@
+ <system-reminder>
+-Your operational mode has changed from plan to build.
++Your operational mode has changed from planning to execution (the build agent).
++This means implementation mode, not project compilation.
+ You are no longer in read-only mode.
+-You are permitted to make file changes, run shell commands, and utilize your arsenal of tools as needed.
++You may now make file changes, run shell commands, and use the available tools needed to implement the approved plan.
+ </system-reminder>
+
+diff --git a/packages/opencode/src/session/prompt/plan.txt b/packages/opencode/src/session/prompt/plan.txt
+index 1806e0e..aee87da 100644
+--- a/packages/opencode/src/session/prompt/plan.txt
++++ b/packages/opencode/src/session/prompt/plan.txt
+@@ -23,4 +23,34 @@ Ask the user clarifying questions or ask for their opinion when weighing tradeof
+ ## Important
+ 
+ The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
++
++## TDD Todo Contract
++
++Before finalizing the plan, you MUST call `todowrite`.
++
++For implementation work, the todo list MUST include explicit TDD-oriented steps when applicable:
++1. confirm scope, files, and constraints
++2. identify existing tests or missing tests
++3. write or update failing tests first
++4. define or run the exact test command needed to confirm failure
++5. implement the minimal production change
++6. run tests to confirm success
++7. refactor or cleanup if needed
++8. provide execution handoff
++
++If the user provides pseudocode or a detailed implementation plan, preserve it faithfully.
++Do not silently rewrite the user's algorithm into a different one unless you explicitly call out the deviation and why it is necessary.
++
++The visible plan must match the todo list.
++Todos are the execution contract, not scratch notes.
++
++Structure the final plan so it can be rendered cleanly for the user:
++- start with `# Goal`
++- then `# Plan Rationale`
++- then `# Actions`
++- use `## Step N: ...` for each major step
++- in every major step include explicit `What:`, `Why:`, and `Files/Tests:` lines before the detailed bullets
++- keep the final summary concise enough that a rendered HTML view can generate anchors and a final summary table from those sections
++
++If the task is too small to require full TDD, say so explicitly and provide the lightest valid plan instead of forcing ceremony.
+ </system-reminder>
+
+diff --git a/packages/opencode/src/tool/plan.ts b/packages/opencode/src/tool/plan.ts
+index e91bc3f..1835b0b 100644
+--- a/packages/opencode/src/tool/plan.ts
++++ b/packages/opencode/src/tool/plan.ts
+@@ -1,8 +1,10 @@
+ import z from "zod"
+ import path from "path"
++import { pathToFileURL } from "node:url"
+ import { Tool } from "./tool"
+ import { Question } from "../question"
+ import { Session } from "../session"
++import * as SessionPlanHtml from "../session/plan-html"
+ import { MessageV2 } from "../session/message-v2"
+ import { Provider } from "../provider/provider"
+ import { Instance } from "../project/instance"
+@@ -22,11 +24,31 @@ export const PlanExitTool = Tool.define("plan_exit", {
+   async execute(_params, ctx) {
+     const session = await Session.get(ctx.sessionID)
+     const plan = path.relative(Instance.worktree, Session.plan(session))
++    let planHtml: string | undefined
++
++    try {
++      const rendered = await SessionPlanHtml.renderExistingPlanArtifacts({ session })
++      planHtml = path.relative(Instance.worktree, rendered.htmlPath)
++      if (SessionPlanHtml.shouldAttachPlanHtml(ctx.sessionID, rendered.hash, rendered.ready)) {
++        await Session.updatePart({
++          id: PartID.ascending(),
++          messageID: ctx.messageID,
++          sessionID: ctx.sessionID,
++          type: "file",
++          filename: path.basename(rendered.htmlPath),
++          mime: "text/html",
++          url: pathToFileURL(rendered.htmlPath).href,
++        } satisfies MessageV2.FilePart)
++      }
++    } catch {
++      planHtml = undefined
++    }
++
+     const answers = await Question.ask({
+       sessionID: ctx.sessionID,
+       questions: [
+         {
+-          question: `Plan at ${plan} is complete. Would you like to switch to the build agent and start implementing?`,
++          question: `Plan at ${plan} is complete.${planHtml ? ` A rendered HTML view is available at ${planHtml}.` : ""} Would you like to switch to the build agent and start implementing?`,
+           header: "Build Agent",
+           custom: false,
+           options: [
+
+diff --git a/packages/opencode/test/session/plan-html.test.ts b/packages/opencode/test/session/plan-html.test.ts
+new file mode 100644
+index 0000000..147189e
+--- /dev/null
++++ b/packages/opencode/test/session/plan-html.test.ts
+@@ -0,0 +1,132 @@
++import { describe, expect, test } from "bun:test"
++import fs from "node:fs/promises"
++import path from "node:path"
++
++import { Session } from "../../src/session"
++import * as SessionPlanHtml from "../../src/session/plan-html"
++import { MessageV2 } from "../../src/session/message-v2"
++import { MessageID, PartID, SessionID } from "../../src/session/schema"
++import { Instance } from "../../src/project/instance"
++import { tmpdir } from "../fixture/fixture"
++
++const SAMPLE_PLAN = `# Goal
++Add an HTML plan artifact that is easy to review in a browser.
++
++# Plan Rationale
++We want a durable **plan artifact** with rationale, sections, and a [final summary table](https://example.com/summary).
++
++# Actions
++## Step 1: Analyze the current plan output
++What: Inspect the existing plan prompts and completion flow.
++Why: We need a reliable integration point before generating artifacts.
++Files/Tests: packages/opencode/src/session/prompt.ts, packages/opencode/src/session/processor.ts
++
++- Review the prompt contract
++- Confirm how completed plan messages are persisted
++
++## Step 2: Generate the HTML artifact
++What: Render a dedicated HTML file from the final plan content.
++Why: This gives the user a clean browser view with anchors and recap links.
++Files/Tests: packages/opencode/src/session/plan-html.ts, packages/opencode/src/tool/plan.ts
++
++- Write the renderer
++- Attach the generated HTML file to the message
++`
++
++describe("session.plan-html", () => {
++  test("renders sections and a final summary table", () => {
++    const html = SessionPlanHtml.renderPlanHtml(SAMPLE_PLAN, ".opencode/plans/example.md")
++
++    expect(html).toContain("Plan Summary")
++    expect(html).toContain("Jump")
++    expect(html.indexOf("Plan Summary")).toBeLessThan(html.indexOf("Step 1: Analyze the current plan output"))
++    expect(html).toContain('id="step-1-analyze-the-current-plan-output"')
++    expect(html).toContain("Inspect the existing plan prompts and completion flow.")
++    expect(html).toContain("<strong>plan artifact</strong>")
++    expect(html).toContain('href="https://example.com/summary"')
++    expect(html).toContain("This gives the user a clean browser view with anchors and recap links.")
++  })
++
++  test("filters synthetic reminders and extracts markdown text", () => {
++    const parts: MessageV2.Part[] = [
++      {
++        id: PartID.ascending(),
++        messageID: MessageID.make("message_1"),
++        sessionID: SessionID.make("session_1"),
++        type: "text",
++        text: `<system-reminder>Do not render me</system-reminder>`,
++        synthetic: true,
++      },
++      {
++        id: PartID.ascending(),
++        messageID: MessageID.make("message_1"),
++        sessionID: SessionID.make("session_1"),
++        type: "tool",
++        tool: "todowrite",
++        callID: "call_1",
++        state: {
++          status: "completed",
++          input: {},
++          output: "ok",
++          metadata: {},
++          title: "updated todos",
++          time: { start: Date.now(), end: Date.now() },
++        },
++      } as MessageV2.ToolPart,
++      {
++        id: PartID.ascending(),
++        messageID: MessageID.make("message_1"),
++        sessionID: SessionID.make("session_1"),
++        type: "text",
++        text: "<system-reminder>Internal note</system-reminder>\n# Goal\nPlan content",
++      },
++    ]
++
++    expect(SessionPlanHtml.hasTodoWriteCompletion(parts)).toBe(true)
++    expect(SessionPlanHtml.markdownFromParts(parts)).toBe("# Goal\nPlan content")
++  })
++
++  test("opens only for plans with final structure and dedupes attachments per version", () => {
++    const ready = SAMPLE_PLAN
++    const incomplete = `# Goal\nDraft only\n\n# Plan Rationale\nStill exploring.`
++    const sessionID = SessionID.make("session_ready_plan")
++
++    expect(SessionPlanHtml.isPlanReadyForOpen(incomplete)).toBe(false)
++    expect(SessionPlanHtml.isPlanReadyForOpen(ready)).toBe(true)
++
++    expect(SessionPlanHtml.shouldAttachPlanHtml(sessionID, "hash-a", false)).toBe(false)
++    expect(SessionPlanHtml.shouldAttachPlanHtml(sessionID, "hash-a", true)).toBe(true)
++    expect(SessionPlanHtml.shouldAttachPlanHtml(sessionID, "hash-a", true)).toBe(false)
++    expect(SessionPlanHtml.shouldAttachPlanHtml(sessionID, "hash-b", true)).toBe(true)
++  })
++
++  test("writes markdown and html artifacts next to the session plan path", async () => {
++    await using tmp = await tmpdir({ git: true })
++
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        const artifacts = await SessionPlanHtml.renderPlanArtifacts({
++          session,
++          markdown: SAMPLE_PLAN,
++          autoOpen: false,
++        })
++
++        expect(artifacts.markdownPath.endsWith(".md")).toBe(true)
++        expect(artifacts.htmlPath.endsWith(".html")).toBe(true)
++        expect(artifacts.ready).toBe(true)
++        expect(path.dirname(artifacts.markdownPath)).toBe(path.dirname(artifacts.htmlPath))
++
++        const markdown = await fs.readFile(artifacts.markdownPath, "utf8")
++        const html = await fs.readFile(artifacts.htmlPath, "utf8")
++
++        expect(markdown).toBe(SAMPLE_PLAN)
++        expect(html).toContain("Plan Summary")
++        expect(html).toContain(path.basename(artifacts.markdownPath))
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++})

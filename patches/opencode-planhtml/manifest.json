@@ -1,0 +1,20 @@
+{
+  "repo": "https://github.com/anomalyco/opencode.git",
+  "ref": "79df21098d76121e3cc2b9e0a1fda415560d2082",
+  "patchFile": "patches/opencode-planhtml/opencode-planhtml.patch",
+  "packageDir": "packages/opencode",
+  "files": [
+    "packages/opencode/package.json",
+    "packages/opencode/src/agent/agent.ts",
+    "packages/opencode/src/flag/flag.ts",
+    "packages/opencode/src/session/index.ts",
+    "packages/opencode/src/session/plan-html.ts",
+    "packages/opencode/src/session/processor.ts",
+    "packages/opencode/src/session/prompt.ts",
+    "packages/opencode/src/session/prompt/build-switch.txt",
+    "packages/opencode/src/session/prompt/plan.txt",
+    "packages/opencode/src/tool/plan.ts",
+    "packages/opencode/test/session/plan-html.test.ts"
+  ],
+  "generatedAt": "2026-03-31T14:58:53.544Z"
+}
