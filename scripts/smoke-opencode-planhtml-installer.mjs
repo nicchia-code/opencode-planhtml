@@ -10,7 +10,6 @@ import { promisify } from "node:util"
 const execFileAsync = promisify(execFile)
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const cliPath = path.join(projectRoot, "bin", "opencode-planhtml.mjs")
-const upstreamRepo = path.join(os.homedir(), "Developer", "opencode")
 
 async function runNode(args) {
   await execFileAsync("node", [cliPath, ...args], {
@@ -36,8 +35,6 @@ async function main() {
 
   try {
     await runNode([
-      "--repo",
-      upstreamRepo,
       "--source-dir",
       sourceDir,
       "--bin-dir",

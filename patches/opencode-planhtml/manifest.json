@@ -1,6 +1,6 @@
 {
   "repo": "https://github.com/anomalyco/opencode.git",
-  "ref": "79df21098d76121e3cc2b9e0a1fda415560d2082",
+  "ref": "1d363fa19fe9c1445f635498da48211bf09cbc97",
   "patchFile": "patches/opencode-planhtml/opencode-planhtml.patch",
   "packageDir": "packages/opencode",
   "files": [
