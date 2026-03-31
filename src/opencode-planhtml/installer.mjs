@@ -43,9 +43,41 @@ export function builtBinaryRelativePath(platform = process.platform, arch = proc
   return path.join("packages", "opencode", "dist", `opencode-${platformLabel}-${archLabel}`, "bin", binary)
 }
 
+function sanitizeCliArgs(argv) {
+  const sanitized = []
+  let insideSystemReminder = false
+
+  for (const rawArg of argv) {
+    const arg = String(rawArg)
+
+    if (arg === "--") {
+      continue
+    }
+
+    if (insideSystemReminder) {
+      if (arg.includes("</system-reminder>")) {
+        insideSystemReminder = false
+      }
+      continue
+    }
+
+    if (arg.startsWith("<system-reminder>") || arg.startsWith("--<system-reminder>")) {
+      if (!arg.includes("</system-reminder>")) {
+        insideSystemReminder = true
+      }
+      continue
+    }
+
+    sanitized.push(arg)
+  }
+
+  return sanitized
+}
+
 export function parseCliArgs(argv) {
-  const command = argv[0] && !argv[0].startsWith("-") ? argv[0] : "install"
-  const args = command === "install" ? argv.slice(argv[0] === command ? 1 : 0) : argv.slice(1)
+  const sanitizedArgv = sanitizeCliArgs(argv)
+  const command = sanitizedArgv[0] && !sanitizedArgv[0].startsWith("-") ? sanitizedArgv[0] : "install"
+  const args = command === "install" ? sanitizedArgv.slice(sanitizedArgv[0] === command ? 1 : 0) : sanitizedArgv.slice(1)
   const result = {
     command,
     dryRun: false,
@@ -106,7 +138,7 @@ function usage() {
     "",
     "Default command: install",
     "Typical GitHub usage:",
-    "  bunx github:nicchia-code/opencode-planhtml -- --link-name opencode",
+    "  bunx github:nicchia-code/opencode-planhtml --link-name opencode",
     "  bun install -g github:nicchia-code/opencode-planhtml && opencode-planhtml --link-name opencode",
   ].join("\n")
 }

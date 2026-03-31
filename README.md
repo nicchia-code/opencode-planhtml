@@ -14,15 +14,17 @@ It does four things:
 Run directly with Bun:
 
 ```bash
- bunx github:nicchia-code/opencode-planhtml -- --link-name opencode
+bunx github:nicchia-code/opencode-planhtml --link-name opencode
 ```
 
 Or install the helper globally first:
 
 ```bash
- bun install -g github:nicchia-code/opencode-planhtml
+bun install -g github:nicchia-code/opencode-planhtml
 opencode-planhtml --link-name opencode
 ```
+
+If your shell or runner forwards a literal `--`, the installer ignores it, so `bunx github:nicchia-code/opencode-planhtml -- --link-name opencode` also works.
 
 By default this will:
 
