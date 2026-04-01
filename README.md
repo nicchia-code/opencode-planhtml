@@ -24,6 +24,18 @@ bun install -g github:nicchia-code/opencode-planhtml
 opencode-planhtml --link-name opencode
 ```
 
+Upgrade an existing patched install by rerunning the same command:
+
+```bash
+bunx github:nicchia-code/opencode-planhtml --link-name opencode
+```
+
+Or, if you already installed the helper globally:
+
+```bash
+opencode-planhtml --link-name opencode
+```
+
 By default this will:
 
 - clone the pinned upstream OpenCode repo

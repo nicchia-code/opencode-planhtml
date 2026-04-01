@@ -1,6 +1,12 @@
+import fs from "node:fs/promises"
+import { fileURLToPath } from "node:url"
+
 import { describe, expect, it } from "vitest"
 
 import { builtBinaryRelativePath, defaultPaths, parseCliArgs } from "../src/opencode-planhtml/installer.mjs"
+
+const manifestPath = fileURLToPath(new URL("../patches/opencode-planhtml/manifest.json", import.meta.url))
+const patchPath = fileURLToPath(new URL("../patches/opencode-planhtml/opencode-planhtml.patch", import.meta.url))
 
 describe("opencode plan HTML installer helpers", () => {
   it("computes stable default directories", () => {
@@ -37,5 +43,17 @@ describe("opencode plan HTML installer helpers", () => {
     expect(parsed.command).toBe("uninstall")
     expect(parsed.purge).toBe(true)
     expect(parsed.binDir).toBe("/tmp/bin")
+  })
+
+  it("keeps manifest files in sync with the exported patch", async () => {
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8")) as { files: string[] }
+    const patch = await fs.readFile(patchPath, "utf8")
+    const patchedFiles = Array.from(
+      new Set(
+        Array.from(patch.matchAll(/^diff --git a\/(.+?) b\//gm), (match) => match[1]),
+      ),
+    ).sort()
+
+    expect(manifest.files.slice().sort()).toEqual(patchedFiles)
   })
 })

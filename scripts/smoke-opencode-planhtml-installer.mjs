@@ -32,20 +32,23 @@ async function main() {
   const sourceDir = path.join(tempRoot, "source")
   const binDir = path.join(tempRoot, "bin")
   const stateDir = path.join(tempRoot, "state")
+  const installArgs = [
+    "--source-dir",
+    sourceDir,
+    "--bin-dir",
+    binDir,
+    "--state-dir",
+    stateDir,
+    "--link-name",
+    "opencode-test",
+  ]
 
   try {
-    await runNode([
-      "--source-dir",
-      sourceDir,
-      "--bin-dir",
-      binDir,
-      "--state-dir",
-      stateDir,
-      "--link-name",
-      "opencode-test",
-    ])
+    await runNode(installArgs)
 
     const binaryPath = path.join(binDir, "opencode-test")
+    await runCommand(binaryPath, ["--version"])
+    await runNode(installArgs)
     await runCommand(binaryPath, ["--version"])
 
     await runNode([
