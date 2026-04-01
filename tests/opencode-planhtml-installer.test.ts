@@ -56,4 +56,15 @@ describe("opencode plan HTML installer helpers", () => {
 
     expect(manifest.files.slice().sort()).toEqual(patchedFiles)
   })
+
+  it("uses the supported Effect catch helper in the processor patch", async () => {
+    const patch = await fs.readFile(patchPath, "utf8")
+    const processorSection =
+      patch.match(
+        /^diff --git a\/packages\/opencode\/src\/session\/processor\.ts b\/packages\/opencode\/src\/session\/processor\.ts[\s\S]*?(?=^diff --git |\Z)/m,
+      )?.[0] ?? ""
+
+    expect(processorSection).toContain("Effect.catch(")
+    expect(processorSection).not.toContain("Effect.catchAll(")
+  })
 })

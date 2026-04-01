@@ -498,7 +498,7 @@ index 0000000..7de4856
 +}
 
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 2482e40..72643b1 100644
+index 2482e40..f8f5e53 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
 @@ -3,6 +3,7 @@ import * as Stream from "effect/Stream"
@@ -542,7 +542,7 @@ index 2482e40..72643b1 100644
 +                )
 +              }
 +            }).pipe(
-+              Effect.catchAll((error) =>
++              Effect.catch((error) =>
 +                Effect.sync(() => {
 +                  log.warn("plan html render failed", {
 +                    error: error instanceof Error ? error.message : String(error),
