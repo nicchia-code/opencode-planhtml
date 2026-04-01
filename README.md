@@ -36,6 +36,12 @@ Or, if you already installed the helper globally:
 opencode-planhtml --link-name opencode
 ```
 
+If Bun seems to reuse an older cached GitHub package revision, force the latest repo state:
+
+```bash
+bunx github:nicchia-code/opencode-planhtml#main --link-name opencode
+```
+
 By default this will:
 
 - clone the pinned upstream OpenCode repo
