@@ -975,7 +975,7 @@ index 27190f2eb..7f11969d9 100644
    export const OPENCODE_DISABLE_MODELS_FETCH = truthy("OPENCODE_DISABLE_MODELS_FETCH")
 
 diff --git a/packages/opencode/src/server/instance.ts b/packages/opencode/src/server/instance.ts
-index 4bb6efaf9..be15bdf93 100644
+index 4bb6efaf9..c42ac40f4 100644
 --- a/packages/opencode/src/server/instance.ts
 +++ b/packages/opencode/src/server/instance.ts
 @@ -17,6 +17,7 @@ import { Flag } from "../flag/flag"
@@ -986,7 +986,40 @@ index 4bb6efaf9..be15bdf93 100644
  import { SessionRoutes } from "./routes/session"
  import { PtyRoutes } from "./routes/pty"
  import { McpRoutes } from "./routes/mcp"
-@@ -47,6 +48,7 @@ export const InstanceRoutes = (app?: Hono) =>
+@@ -26,6 +27,7 @@ import { ExperimentalRoutes } from "./routes/experimental"
+ import { ProviderRoutes } from "./routes/provider"
+ import { EventRoutes } from "./routes/event"
+ import { errorHandler } from "./middleware"
++import { Filesystem } from "../util/filesystem"
+ 
+ const log = Log.create({ service: "server" })
+ 
+@@ -34,12 +36,21 @@ const embeddedUIPromise = Flag.OPENCODE_DISABLE_EMBEDDED_WEB_UI
+   : // @ts-expect-error - generated file at build time
+     import("opencode-web-ui.gen.ts").then((module) => module.default as Record<string, string>).catch(() => null)
+ 
+-const DEFAULT_CSP =
+-  "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' data:"
+-
+ const csp = (hash = "") =>
+   `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'${hash ? ` 'sha256-${hash}'` : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' data:`
+ 
++export function embeddedContentType(assetKey: string, fileType: string) {
++  const inferred = Filesystem.mimeType(assetKey)
++  if (inferred !== "application/octet-stream") return inferred
++  return fileType || "application/octet-stream"
++}
++
++export function embeddedHtmlCsp(html: string) {
++  const match = html.match(/<script\b(?![^>]*\bsrc\s*=)[^>]*\bid=(['"])oc-theme-preload-script\1[^>]*>([\s\S]*?)<\/script>/i)
++  const hash = match ? createHash("sha256").update(match[2]).digest("base64") : ""
++  return csp(hash)
++}
++
+ export const InstanceRoutes = (app?: Hono) =>
+   (app ?? new Hono())
+     .onError(errorHandler(log))
+@@ -47,6 +58,7 @@ export const InstanceRoutes = (app?: Hono) =>
      .route("/pty", PtyRoutes())
      .route("/config", ConfigRoutes())
      .route("/experimental", ExperimentalRoutes())
@@ -994,6 +1027,50 @@ index 4bb6efaf9..be15bdf93 100644
      .route("/session", SessionRoutes())
      .route("/permission", PermissionRoutes())
      .route("/question", QuestionRoutes())
+@@ -248,23 +260,28 @@ export const InstanceRoutes = (app?: Hono) =>
+         return c.json(await Format.status())
+       },
+     )
+-    .all("/*", async (c) => {
+-      const embeddedWebUI = await embeddedUIPromise
+-      const path = c.req.path
++      .all("/*", async (c) => {
++        const embeddedWebUI = await embeddedUIPromise
++        const path = c.req.path
+ 
+-      if (embeddedWebUI) {
+-        const match = embeddedWebUI[path.replace(/^\//, "")] ?? embeddedWebUI["index.html"] ?? null
+-        if (!match) return c.json({ error: "Not Found" }, 404)
+-        const file = Bun.file(match)
+-        if (await file.exists()) {
+-          c.header("Content-Type", file.type)
+-          if (file.type.startsWith("text/html")) {
+-            c.header("Content-Security-Policy", DEFAULT_CSP)
++        if (embeddedWebUI) {
++          const requestedKey = path.replace(/^\//, "")
++          const assetKey = embeddedWebUI[requestedKey] ? requestedKey : "index.html"
++          const match = embeddedWebUI[assetKey] ?? null
++          if (!match) return c.json({ error: "Not Found" }, 404)
++          const file = Bun.file(match)
++          if (await file.exists()) {
++            const contentType = embeddedContentType(assetKey, file.type)
++            c.header("Content-Type", contentType)
++            if (contentType.startsWith("text/html")) {
++              const html = await file.text()
++              c.header("Content-Security-Policy", embeddedHtmlCsp(html))
++              return c.body(html)
++            }
++            return c.body(await file.arrayBuffer())
++          } else {
++            return c.json({ error: "Not Found" }, 404)
+           }
+-          return c.body(await file.arrayBuffer())
+-        } else {
+-          return c.json({ error: "Not Found" }, 404)
+-        }
+       } else {
+         const response = await proxy(`https://app.opencode.ai${path}`, {
+           ...c.req,
 
 diff --git a/packages/opencode/src/server/routes/session-plan.ts b/packages/opencode/src/server/routes/session-plan.ts
 new file mode 100644
