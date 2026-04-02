@@ -294,10 +294,10 @@ index 000000000..19c96ad0f
 
 diff --git a/packages/app/src/pages/session-plan.test.tsx b/packages/app/src/pages/session-plan.test.tsx
 new file mode 100644
-index 000000000..046b5cb51
+index 000000000..45993b4dc
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.test.tsx
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,198 @@
 +import { beforeAll, describe, expect, mock, test } from "bun:test"
 +import fs from "node:fs"
 +
@@ -486,14 +486,23 @@ index 000000000..046b5cb51
 +    expect(source).toContain('data-plan-node-text="true"')
 +    expect(source).toContain('closest<HTMLElement>("[data-plan-node-text][data-plan-node-id]")')
 +  })
++
++  test("forces the standalone review page background onto html and body to avoid dark overscroll", () => {
++    const source = fs.readFileSync(new URL("./session-plan.tsx", import.meta.url), "utf8")
++
++    expect(source).toContain("document.documentElement.style")
++    expect(source).toContain("document.body.style")
++    expect(source).toContain('bodyStyle.minHeight = "100vh"')
++    expect(source).toContain('htmlStyle.backgroundColor = REVIEW_BACKGROUND')
++  })
 +})
 
 diff --git a/packages/app/src/pages/session-plan.tsx b/packages/app/src/pages/session-plan.tsx
 new file mode 100644
-index 000000000..5eda78969
+index 000000000..cfcbe4b7a
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.tsx
-@@ -0,0 +1,600 @@
+@@ -0,0 +1,621 @@
 +import { Button } from "@opencode-ai/ui/button"
 +import { showToast } from "@opencode-ai/ui/toast"
 +import { useSearchParams, useParams } from "@solidjs/router"
@@ -521,10 +530,12 @@ index 000000000..5eda78969
 +
 +type TextRangeAnchor = Extract<PlanCommentAnchor, { kind: "text-range" }>
 +
++const REVIEW_BACKGROUND = "#fbfbfa"
++
 +const REVIEW_THEME_STYLE: JSX.CSSProperties = {
 +  "color-scheme": "light",
 +  "font-family": 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-+  "--background-base": "#fbfbfa",
++  "--background-base": REVIEW_BACKGROUND,
 +  "--background-weak": "#f7f6f3",
 +  "--background-strong": "#ffffff",
 +  "--background-stronger": "#ffffff",
@@ -848,9 +859,28 @@ index 000000000..5eda78969
 +  const planComments = createMemo(() => createPlanCommentSession(storageKey()))
 +
 +  onMount(() => {
++    const htmlStyle = document.documentElement.style
++    const bodyStyle = document.body.style
++    const previousHtmlBackground = htmlStyle.backgroundColor
++    const previousHtmlColorScheme = htmlStyle.colorScheme
++    const previousBodyBackground = bodyStyle.backgroundColor
++    const previousBodyMinHeight = bodyStyle.minHeight
++
++    htmlStyle.backgroundColor = REVIEW_BACKGROUND
++    htmlStyle.colorScheme = "light"
++    bodyStyle.backgroundColor = REVIEW_BACKGROUND
++    bodyStyle.minHeight = "100vh"
++
 +    if (searchParams["plan-token"]) {
 +      setSearchParams({ ...searchParams, "plan-token": undefined })
 +    }
++
++    onCleanup(() => {
++      htmlStyle.backgroundColor = previousHtmlBackground
++      htmlStyle.colorScheme = previousHtmlColorScheme
++      bodyStyle.backgroundColor = previousBodyBackground
++      bodyStyle.minHeight = previousBodyMinHeight
++    })
 +  })
 +
 +  createEffect(() => {
