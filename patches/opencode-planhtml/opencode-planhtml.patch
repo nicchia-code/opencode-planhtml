@@ -1139,12 +1139,11 @@ index 4bb6efaf9..c42ac40f4 100644
 
 diff --git a/packages/opencode/src/server/routes/session-plan.ts b/packages/opencode/src/server/routes/session-plan.ts
 new file mode 100644
-index 000000000..2d586b660
+index 000000000..51cbcc4c2
 --- /dev/null
 +++ b/packages/opencode/src/server/routes/session-plan.ts
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,142 @@
 +import fs from "node:fs/promises"
-+import path from "node:path"
 +import { Hono } from "hono"
 +import { describeRoute, resolver, validator } from "hono-openapi"
 +import z from "zod"
@@ -1153,7 +1152,6 @@ index 000000000..2d586b660
 +import { Session } from "../../session"
 +import * as SessionPlanAction from "../../session/plan-action"
 +import * as SessionPlanHtml from "../../session/plan-html"
-+import * as SessionPlanUser from "../../session/plan-user"
 +import { lazy } from "../../util/lazy"
 +
 +const params = z.object({
@@ -1182,34 +1180,18 @@ index 000000000..2d586b660
 +      validator("param", params),
 +      async (c) => {
 +        const sessionID = c.req.valid("param").sessionID
-+        const session = await Session.get(sessionID)
-+        const sourcePath = Session.planUser(session)
 +        try {
-+          const markdown = await fs.readFile(sourcePath, "utf8")
-+          const document = SessionPlanUser.buildPlanUserDocument(markdown, sourcePath)
++          const current = await SessionPlanAction.getCurrentPlan(sessionID)
++          if (!current.user) {
++            return c.json({ error: "plan_not_found" }, 404)
++          }
 +          return c.json({
-+            document,
-+            markdown,
-+            sourcePath,
++            document: current.user.document,
++            markdown: current.user.markdown,
++            sourcePath: current.user.sourcePath,
 +          })
 +        } catch (error) {
 +          if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
-+            try {
-+              const planMarkdown = await fs.readFile(Session.plan(session), "utf8")
-+              if (SessionPlanHtml.isPlanReadyForOpen(planMarkdown)) {
-+                const markdown = SessionPlanUser.deriveUserPlanMarkdown(planMarkdown)
-+                await fs.mkdir(path.dirname(sourcePath), { recursive: true })
-+                await fs.writeFile(sourcePath, markdown, "utf8")
-+                const document = SessionPlanUser.buildPlanUserDocument(markdown, sourcePath)
-+                return c.json({
-+                  document,
-+                  markdown,
-+                  sourcePath,
-+                })
-+              }
-+            } catch (planError) {
-+              if ((planError as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw planError
-+            }
 +            return c.json({ error: "plan_not_found" }, 404)
 +          }
 +          throw error
@@ -1334,10 +1316,10 @@ index 5ed5acafa..5885faf4a 100644
 
 diff --git a/packages/opencode/src/session/plan-action.ts b/packages/opencode/src/session/plan-action.ts
 new file mode 100644
-index 000000000..fc7df6a6e
+index 000000000..1a5c944cf
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-action.ts
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,363 @@
 +import fs from "node:fs/promises"
 +import path from "node:path"
 +import { setTimeout as sleep } from "node:timers/promises"
@@ -1356,6 +1338,8 @@ index 000000000..fc7df6a6e
 +import * as SessionPlanUser from "./plan-user"
 +
 +const log = Log.create({ service: "session.plan-action" })
++
++const pendingReplans = new Map<SessionID, string>()
 +
 +export class StalePlanRevisionError extends Error {
 +  constructor(
@@ -1415,12 +1399,21 @@ index 000000000..fc7df6a6e
 +  return Provider.defaultModel()
 +}
 +
-+async function getCurrentPlan(sessionID: SessionID) {
++function consumePendingReplanIfRevisionChanged(sessionID: SessionID, currentPlanRevisionID: string) {
++  const pendingRevisionID = pendingReplans.get(sessionID)
++  if (!pendingRevisionID) return false
++  if (pendingRevisionID === currentPlanRevisionID) return false
++  pendingReplans.delete(sessionID)
++  return true
++}
++
++export async function getCurrentPlan(sessionID: SessionID) {
 +  const session = await Session.get(sessionID)
 +  const sourcePath = Session.plan(session)
 +  const markdown = await fs.readFile(sourcePath, "utf8")
 +  const document = SessionPlanHtml.buildPlanDocument(markdown, sourcePath)
 +  const userSourcePath = Session.planUser(session)
++  const shouldRefreshUserPlan = consumePendingReplanIfRevisionChanged(sessionID, document.planRevisionID)
 +  let user:
 +    | {
 +        sourcePath: string
@@ -1429,15 +1422,17 @@ index 000000000..fc7df6a6e
 +      }
 +    | undefined
 +
-+  try {
-+    const userMarkdown = await fs.readFile(userSourcePath, "utf8")
-+    user = {
-+      sourcePath: userSourcePath,
-+      markdown: userMarkdown,
-+      document: SessionPlanUser.buildPlanUserDocument(userMarkdown, userSourcePath),
++  if (!shouldRefreshUserPlan) {
++    try {
++      const userMarkdown = await fs.readFile(userSourcePath, "utf8")
++      user = {
++        sourcePath: userSourcePath,
++        markdown: userMarkdown,
++        document: SessionPlanUser.buildPlanUserDocument(userMarkdown, userSourcePath),
++      }
++    } catch (error) {
++      if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw error
 +    }
-+  } catch (error) {
-+    if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw error
 +  }
 +
 +  if (!user && SessionPlanHtml.isPlanReadyForOpen(markdown)) {
@@ -1634,6 +1629,7 @@ index 000000000..fc7df6a6e
 +  }
 +
 +  const prompt = formatReplanPrompt(current, comments)
++  pendingReplans.set(sessionID, current.document.planRevisionID)
 +  const startPrompt = Instance.bind(async () => {
 +    await waitForIdle(sessionID)
 +    const model = await getLastModel(sessionID)
@@ -1647,6 +1643,7 @@ index 000000000..fc7df6a6e
 +  void Promise.resolve()
 +    .then(startPrompt)
 +    .catch((error) => {
++      pendingReplans.delete(sessionID)
 +      log.error("replan request failed", {
 +        sessionID,
 +        error: error instanceof Error ? error.message : String(error),
@@ -3312,10 +3309,10 @@ index e91bc3faa..da893036a 100644
 
 diff --git a/packages/opencode/test/server/session-plan.test.ts b/packages/opencode/test/server/session-plan.test.ts
 new file mode 100644
-index 000000000..d50fe1385
+index 000000000..05cad4653
 --- /dev/null
 +++ b/packages/opencode/test/server/session-plan.test.ts
-@@ -0,0 +1,484 @@
+@@ -0,0 +1,553 @@
 +import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 +import fs from "node:fs/promises"
 +import path from "node:path"
@@ -3361,6 +3358,24 @@ index 000000000..d50fe1385
 +- \`packages/opencode/src/session/plan-user.ts\`
 +- \`packages/app/src/pages/session-plan.tsx\`
 +:::
++`
++
++const UPDATED_PLAN = `# Goal
++Add an HTML plan artifact that is easy to review in a browser.
++
++# Plan Rationale
++We want a durable plan artifact with rationale and sections.
++
++# Actions
++## Step 1: Tighten the current plan output
++What: Inspect the existing plan prompts, the review page refresh flow, and the saved user-facing plan.
++Why: We need the refreshed review page to surface the new plan revision instead of stale content.
++Files/Tests: packages/opencode/src/session/plan-action.ts, packages/opencode/src/server/routes/session-plan.ts
++
++## Step 2: Regenerate the user-facing artifact
++What: Rewrite the user-facing review plan whenever the internal revision changes.
++Why: The browser must see the new review copy after replan.
++Files/Tests: packages/opencode/src/session/plan-user.ts, packages/opencode/test/server/session-plan.test.ts
 +`
 +
 +afterEach(async () => {
@@ -3530,6 +3545,57 @@ index 000000000..d50fe1385
 +        await expect(askPromise).resolves.toEqual([["No"]])
 +        await waitFor(() => prompt.mock.calls.length > 0)
 +        expect(prompt).toHaveBeenCalled()
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++
++  test("serves a refreshed user-facing plan after replan updates only the internal plan", async () => {
++    await using tmp = await tmpdir({ git: true })
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        const artifacts = await SessionPlanHtml.renderPlanArtifacts({
++          session,
++          markdown: SAMPLE_PLAN,
++          userMarkdown: SAMPLE_USER_PLAN,
++          autoOpen: false,
++        })
++        spyOn(SessionPrompt, "prompt").mockResolvedValue({ info: {} as never, parts: [] })
++
++        await SessionPlanAction.requestPlanRevision(session.id, {
++          planRevisionID: artifacts.hash,
++          comments: [
++            {
++              sectionID: "step-1-analyze-the-current-plan-output",
++              title: "Step 1: Analyze the current plan output",
++              note: "Refresh this step after replan.",
++            },
++          ],
++        })
++
++        await fs.writeFile(Session.plan(session), UPDATED_PLAN, "utf8")
++
++        const app = Server.Default()
++        const res = await app.request(`/session/${session.id}/plan/user`, {
++          method: "GET",
++          headers: {
++            "x-opencode-directory": tmp.path,
++          },
++        })
++
++        expect(res.status).toBe(200)
++        expect(await res.json()).toEqual(
++          expect.objectContaining({
++            markdown: expect.stringContaining("# Piano Razionale"),
++            document: expect.objectContaining({
++              title: "Add an HTML plan artifact that is easy to review in a browser.",
++            }),
++          }),
++        )
++        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain("refresh flow")
 +
 +        await Session.remove(session.id)
 +      },
