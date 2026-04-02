@@ -3294,10 +3294,10 @@ index 000000000..82e97392d
 
 diff --git a/packages/opencode/src/session/plan-user.ts b/packages/opencode/src/session/plan-user.ts
 new file mode 100644
-index 000000000..fbc3bdd32
+index 000000000..76b8ee46c
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-user.ts
-@@ -0,0 +1,420 @@
+@@ -0,0 +1,427 @@
 +import { createHash } from "node:crypto"
 +import path from "node:path"
 +
@@ -3376,6 +3376,8 @@ index 000000000..fbc3bdd32
 +  /\bas\s+above\b/i,
 +]
 +
++export const USER_PLAN_DELIMITER = "===PIANO UTENTE==="
++
 +function escapeHtml(value: string): string {
 +  return value
 +    .replace(/&/g, "&amp;")
@@ -3412,7 +3414,11 @@ index 000000000..fbc3bdd32
 +}
 +
 +export function sanitizeUserPlanMarkdown(markdown: string) {
-+  return normalize(markdown)
++  const normalized = normalize(markdown)
++  const markerIndex = normalized.indexOf(USER_PLAN_DELIMITER)
++  const isolated = markerIndex >= 0 ? normalized.slice(markerIndex + USER_PLAN_DELIMITER.length) : normalized
++
++  return isolated
 +    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "")
 +    .split(/\r?\n/)
 +    .join("\n")
@@ -3613,7 +3619,8 @@ index 000000000..fbc3bdd32
 +    }
 +  }
 +
-+  return sanitizeUserPlanMarkdown(result)
++  const finalized = sanitizeUserPlanMarkdown(result)
++  return `${USER_PLAN_DELIMITER}\n\n${finalized}`
 +}
 +
 +export function buildPlanUserDocument(markdown: string, sourcePath: string): PlanUserDocument {
@@ -3783,7 +3790,7 @@ index 2482e40fb..387592542 100644
          const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
 
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 083c23cc6..b9151d7c2 100644
+index 083c23cc6..7454093ca 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
 @@ -18,6 +18,7 @@ import { SystemPrompt } from "./system"
@@ -3809,7 +3816,7 @@ index 083c23cc6..b9151d7c2 100644
            }
            const wasPlan = input.messages.some((msg) => msg.info.role === "assistant" && msg.info.agent === "plan")
            if (wasPlan && input.agent.name === "build") {
-@@ -297,19 +306,24 @@ export namespace SessionPrompt {
+@@ -297,19 +306,25 @@ export namespace SessionPrompt {
          if (input.agent.name !== "plan" || assistantMessage?.info.agent === "plan") return input.messages
  
          const plan = Session.plan(input.session)
@@ -3834,11 +3841,12 @@ index 083c23cc6..b9151d7c2 100644
 +${userExists ? `A user-facing plan file already exists at ${planUser}. You can read it and make incremental edits using the edit tool.` : `No user-facing plan file exists yet. You should create it at ${planUser} using the write tool.`}
 +You must keep BOTH plan files updated together. The internal plan is for execution. The user-facing plan is for human review.
 +Both plans must be complete and self-contained after every update. Never refer to a previous plan version, unchanged sections elsewhere, or earlier drafts.
++The user-facing plan must contain the exact delimiter line ===PIANO UTENTE=== immediately before the user-facing content begins.
 +NOTE that these are the only files you are allowed to edit - other than these you are only allowed to take READ-ONLY actions.
  
  ## Plan Workflow
  
-@@ -359,15 +373,47 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
+@@ -359,15 +374,48 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
  2. Ensure that the plans align with the user's original request
  3. Use question tool to clarify any remaining questions with the user
  
@@ -3850,6 +3858,7 @@ index 083c23cc6..b9151d7c2 100644
 -- Ensure that the plan file is concise enough to scan quickly, but detailed enough to execute effectively
 +- Ensure that the internal plan is concise enough to scan quickly, but detailed enough to execute effectively
 +- Ensure that the user-facing plan is easier to read, more explanatory, and suitable for interactive review
++- Ensure that the user-facing plan contains the exact delimiter line ===PIANO UTENTE=== immediately before \`# Goal\`
  - Include the paths of critical files to be modified
  - Include a verification section describing how to test the changes end-to-end (run the code, use MCP tools, run tests)
 +- Make sure both plan files are fully self-contained after every rewrite
@@ -3947,10 +3956,10 @@ index 1806e0eba..aee87dae2 100644
 
 diff --git a/packages/opencode/src/session/prompt/plan-user.txt b/packages/opencode/src/session/prompt/plan-user.txt
 new file mode 100644
-index 000000000..fe850eb16
+index 000000000..b1a407fe1
 --- /dev/null
 +++ b/packages/opencode/src/session/prompt/plan-user.txt
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,39 @@
 +<system-reminder>
 +## User-Facing Plan File
 +
@@ -3961,8 +3970,10 @@ index 000000000..fe850eb16
 +- never refer to a previous plan, an earlier version, or unchanged sections elsewhere
 +- explain the work in clear user-oriented language
 +- remain structured and scannable
++- include the exact delimiter `===PIANO UTENTE===` on its own line before any user-facing content
 +
 +The user-facing plan MUST start with:
++- `===PIANO UTENTE===`
 +- `# Goal`
 +- `# Piano Razionale`
 +
@@ -5011,10 +5022,10 @@ index 000000000..784aaf3ab
 
 diff --git a/packages/opencode/test/session/plan-user.test.ts b/packages/opencode/test/session/plan-user.test.ts
 new file mode 100644
-index 000000000..81efbd38d
+index 000000000..9bd1362d7
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-user.test.ts
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,110 @@
 +import { describe, expect, test } from "bun:test"
 +
 +import { Instance } from "../../src/project/instance"
@@ -5078,6 +5089,7 @@ index 000000000..81efbd38d
 +  test("derives a valid user-facing plan from the internal plan markdown", () => {
 +    const derived = SessionPlanUser.deriveUserPlanMarkdown(`# Goal\n\nShip the fix.\n\n# Plan Rationale\n\nKeep the change small.\n\n# Actions\n\n## Step 1\nDo it.`)
 +
++    expect(derived).toContain(SessionPlanUser.USER_PLAN_DELIMITER)
 +    expect(derived).toContain("# Goal")
 +    expect(derived).toContain("# Piano Razionale")
 +    expect(derived).not.toContain("# Plan Rationale")
@@ -5093,6 +5105,12 @@ index 000000000..81efbd38d
 +    expect(sanitized).toContain("# Actions")
 +    expect(sanitized).toContain("## Step 1")
 +    expect(sanitized).not.toContain("system-reminder")
++  })
++
++  test("isolates the user-facing section after the fixed delimiter", () => {
++    const sanitized = SessionPlanUser.sanitizeUserPlanMarkdown(`# Goal\n\nInternal details here.\n\n${SessionPlanUser.USER_PLAN_DELIMITER}\n\n# Goal\n\nVisible user plan.\n\n# Piano Razionale\n\nReadable summary.`)
++
++    expect(sanitized).toBe(`# Goal\n\nVisible user plan.\n\n# Piano Razionale\n\nReadable summary.`)
 +  })
 +
 +  test("renders markdown bold in the fallback html snapshot", () => {
