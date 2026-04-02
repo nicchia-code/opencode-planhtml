@@ -294,11 +294,12 @@ index 000000000..19c96ad0f
 
 diff --git a/packages/app/src/pages/session-plan.test.tsx b/packages/app/src/pages/session-plan.test.tsx
 new file mode 100644
-index 000000000..c7a52ce00
+index 000000000..74d15be5c
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.test.tsx
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,123 @@
 +import { beforeAll, describe, expect, mock, test } from "bun:test"
++import fs from "node:fs"
 +
 +import type { PlanUserDocument } from "./session-plan-types"
 +
@@ -317,6 +318,19 @@ index 000000000..c7a52ce00
 +  mock.module("@opencode-ai/ui/toast", () => ({
 +    showToast: () => undefined,
 +  }))
++  globalThis.fetch = mock(async () =>
++    new Response(
++      JSON.stringify({
++        document: SAMPLE_DOCUMENT,
++        markdown: "# Goal\n\nReview this plan.",
++        sourcePath: SAMPLE_DOCUMENT.sourcePath,
++      }),
++      {
++        status: 200,
++        headers: { "content-type": "application/json" },
++      },
++    ),
++  ) as typeof fetch
 +
 +  const mod = await import("./session-plan")
 +  PlanDocumentView = mod.PlanDocumentView
@@ -396,11 +410,21 @@ index 000000000..c7a52ce00
 +      }),
 +    )
 +  })
++
++  test("declares the plan resource before deriving the storage key from plan data", () => {
++    const source = fs.readFileSync(new URL("./session-plan.tsx", import.meta.url), "utf8")
++    const resourceIndex = source.indexOf("const [plan, { refetch }] = createResource")
++    const storageKeyIndex = source.indexOf("const storageKey = createMemo")
++
++    expect(resourceIndex).toBeGreaterThan(-1)
++    expect(storageKeyIndex).toBeGreaterThan(-1)
++    expect(resourceIndex).toBeLessThan(storageKeyIndex)
++  })
 +})
 
 diff --git a/packages/app/src/pages/session-plan.tsx b/packages/app/src/pages/session-plan.tsx
 new file mode 100644
-index 000000000..7671352eb
+index 000000000..55f3f172f
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.tsx
 @@ -0,0 +1,471 @@
@@ -652,12 +676,6 @@ index 000000000..7671352eb
 +  const [searchParams, setSearchParams] = useSearchParams<{ "plan-token"?: string }>()
 +  const directory = createMemo(() => decode64(params.dir) ?? sdk.directory)
 +  const sessionID = createMemo(() => params.id)
-+  const storageKey = createMemo(() => {
-+    const revision = plan()?.document.planRevisionID
-+    if (!revision || !sessionID()) return undefined
-+    return `plan-comments:${directory()}:${sessionID()}:${revision}`
-+  })
-+  const planComments = createMemo(() => createPlanCommentSession(storageKey()))
 +  const [draftAnchor, setDraftAnchor] = createSignal<PlanCommentAnchor | null>(null)
 +  const [draftComment, setDraftComment] = createSignal("")
 +  const [status, setStatus] = createSignal<string>()
@@ -687,6 +705,12 @@ index 000000000..7671352eb
 +      return api<PlanDocumentResponse>(`/session/${id}/plan/user`)
 +    },
 +  )
++  const storageKey = createMemo(() => {
++    const revision = plan()?.document.planRevisionID
++    if (!revision || !sessionID()) return undefined
++    return `plan-comments:${directory()}:${sessionID()}:${revision}`
++  })
++  const planComments = createMemo(() => createPlanCommentSession(storageKey()))
 +
 +  onMount(() => {
 +    if (searchParams["plan-token"]) {
