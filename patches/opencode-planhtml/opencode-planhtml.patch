@@ -2270,13 +2270,13 @@ index 000000000..86557efce
 
 diff --git a/packages/opencode/src/session/plan-server.ts b/packages/opencode/src/session/plan-server.ts
 new file mode 100644
-index 000000000..11e915f7f
+index 000000000..3afbe370a
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-server.ts
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,92 @@
 +import { randomBytes } from "node:crypto"
 +import { Hono } from "hono"
-+import { getCookie, setCookie } from "hono/cookie"
++import { getCookie } from "hono/cookie"
 +
 +import { Server } from "../server/server"
 +import { setPlanServer } from "./plan-control"
@@ -2290,33 +2290,38 @@ index 000000000..11e915f7f
 +  return randomBytes(24).toString("hex")
 +}
 +
++function setPlanCookieHeader(headers: Headers, currentToken: string) {
++  headers.append("set-cookie", `${COOKIE_NAME}=${currentToken}; Path=/; HttpOnly; SameSite=Lax`)
++}
++
 +function appForDirectory(targetDirectory: string, currentToken: string) {
 +  const routes = Server.ControlPlaneRoutes({
 +    cors: [`http://127.0.0.1`, `http://localhost`],
 +  })
 +  const app = new Hono()
 +
-+  app.use("*", async (c, next) => {
-+    const value = c.req.query("plan-token") || c.req.header("x-opencode-plan-token") || getCookie(c, COOKIE_NAME)
++  app.all("*", async (c) => {
++    const cookie = getCookie(c, COOKIE_NAME)
++    const value = c.req.query("plan-token") || c.req.header("x-opencode-plan-token") || cookie
 +    if (value !== currentToken) {
 +      return c.text("Unauthorized", 401)
 +    }
-+    if (!getCookie(c, COOKIE_NAME)) {
-+      setCookie(c, COOKIE_NAME, currentToken, {
-+        httpOnly: true,
-+        sameSite: "Lax",
-+        path: "/",
-+      })
-+    }
-+    await next()
-+  })
 +
-+  app.all("*", async (c) => {
 +    const url = new URL(c.req.url)
 +    if (!url.searchParams.has("directory")) {
 +      url.searchParams.set("directory", targetDirectory)
 +    }
-+    return routes.fetch(new Request(url, c.req.raw), c.env)
++
++    const response = await routes.fetch(new Request(url, c.req.raw), c.env)
++    if (cookie) return response
++
++    const headers = new Headers(response.headers)
++    setPlanCookieHeader(headers, currentToken)
++    return new Response(response.body, {
++      status: response.status,
++      statusText: response.statusText,
++      headers,
++    })
 +  })
 +
 +  return app
@@ -3628,10 +3633,10 @@ index 000000000..d50fe1385
 
 diff --git a/packages/opencode/test/session/plan-html.test.ts b/packages/opencode/test/session/plan-html.test.ts
 new file mode 100644
-index 000000000..6231c05a8
+index 000000000..f300d3ad7
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-html.test.ts
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,302 @@
 +import { afterEach, describe, expect, spyOn, test } from "bun:test"
 +import fs from "node:fs/promises"
 +import path from "node:path"
@@ -3859,6 +3864,51 @@ index 000000000..6231c05a8
 +        expect(artifacts.liveUrl).toBeTruthy()
 +        expect(new URL(artifacts.liveUrl!).pathname).toContain(`/session/${session.id}/plan`)
 +        expect(new URL(artifacts.liveUrl!).searchParams.get("plan-token")).toBeTruthy()
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++
++  test("sets an auth cookie so the review app bundle and API can load", async () => {
++    await using tmp = await tmpdir({ git: true })
++
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        const artifacts = await SessionPlanHtml.renderPlanArtifacts({
++          session,
++          markdown: SAMPLE_PLAN,
++          userMarkdown: SAMPLE_USER_PLAN,
++          autoOpen: false,
++        })
++
++        const page = await fetch(artifacts.liveUrl!)
++        const cookie = page.headers.get("set-cookie")
++        const cookieHeader = cookie?.split(";", 1)[0]
++        const html = await page.text()
++        const bundlePath = html.match(/src="([^"]*\/assets\/[^"]+\.js)"/)?.[1]
++
++        expect(page.status).toBe(200)
++        expect(cookie).toContain("opencode-plan-token=")
++        expect(cookieHeader).toContain("opencode-plan-token=")
++        expect(bundlePath).toBeTruthy()
++
++        const bundle = await fetch(new URL(bundlePath!, artifacts.liveUrl!), {
++          headers: { cookie: cookieHeader! },
++        })
++        expect(bundle.status).toBe(200)
++
++        const planApi = await fetch(new URL(`/session/${session.id}/plan/user?directory=${encodeURIComponent(tmp.path)}`, artifacts.liveUrl!), {
++          headers: { cookie: cookieHeader! },
++        })
++        expect(planApi.status).toBe(200)
++        expect(await planApi.json()).toEqual(
++          expect.objectContaining({
++            sourcePath: Session.planUser(session),
++          }),
++        )
 +
 +        await Session.remove(session.id)
 +      },
