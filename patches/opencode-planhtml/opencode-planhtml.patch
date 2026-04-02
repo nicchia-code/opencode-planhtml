@@ -294,10 +294,10 @@ index 000000000..19c96ad0f
 
 diff --git a/packages/app/src/pages/session-plan.test.tsx b/packages/app/src/pages/session-plan.test.tsx
 new file mode 100644
-index 000000000..029d0fdd2
+index 000000000..6e7b04234
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.test.tsx
-@@ -0,0 +1,131 @@
+@@ -0,0 +1,139 @@
 +import { beforeAll, describe, expect, mock, test } from "bun:test"
 +import fs from "node:fs"
 +
@@ -428,14 +428,22 @@ index 000000000..029d0fdd2
 +    expect(source).not.toContain("{(value) => (")
 +    expect(source).not.toContain("value().document")
 +  })
++
++  test("renders list nodes with concrete ol and ul elements instead of calling a string tag as a component", () => {
++    const source = fs.readFileSync(new URL("./session-plan.tsx", import.meta.url), "utf8")
++
++    expect(source).toContain("fallback={<ul")
++    expect(source).toContain("<ol class=")
++    expect(source).not.toContain('const Tag = (props.node.ordered ? "ol" : "ul")')
++  })
 +})
 
 diff --git a/packages/app/src/pages/session-plan.tsx b/packages/app/src/pages/session-plan.tsx
 new file mode 100644
-index 000000000..045fdcce2
+index 000000000..03b554fc9
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.tsx
-@@ -0,0 +1,469 @@
+@@ -0,0 +1,472 @@
 +import { Button } from "@opencode-ai/ui/button"
 +import { showToast } from "@opencode-ai/ui/toast"
 +import { useSearchParams, useParams } from "@solidjs/router"
@@ -562,21 +570,24 @@ index 000000000..045fdcce2
 +}
 +
 +function ListNode(props: { node: PlanUserListNode; comments: Accessor<PlanComment[]>; onCommentNode?: (nodeID: string) => void }) {
-+  const Tag = (props.node.ordered ? "ol" : "ul") as "ol" | "ul"
++  const listContent = () => (
++    <For each={props.node.items}>
++      {(item) => {
++        const itemComments = createMemo(() => props.comments().filter((comment) => comment.anchor.nodeID === item.id))
++        return (
++          <li data-plan-node-id={item.id} classList={{ "rounded-md bg-yellow-100/50 dark:bg-yellow-500/10": itemComments().length > 0 }}>
++            <TextWithHighlights text={item.text} comments={itemComments()} />
++          </li>
++        )
++      }}
++    </For>
++  )
++
 +  return (
 +    <NodeFrame nodeID={props.node.id} comments={props.comments} onCommentNode={props.onCommentNode}>
-+      <Tag class="pl-5 space-y-2 text-14-regular leading-6 text-text-strong">
-+        <For each={props.node.items}>
-+          {(item) => {
-+            const itemComments = createMemo(() => props.comments().filter((comment) => comment.anchor.nodeID === item.id))
-+            return (
-+              <li data-plan-node-id={item.id} classList={{ "rounded-md bg-yellow-100/50 dark:bg-yellow-500/10": itemComments().length > 0 }}>
-+                <TextWithHighlights text={item.text} comments={itemComments()} />
-+              </li>
-+            )
-+          }}
-+        </For>
-+      </Tag>
++      <Show when={props.node.ordered} fallback={<ul class="pl-5 space-y-2 text-14-regular leading-6 text-text-strong">{listContent()}</ul>}>
++        <ol class="pl-5 space-y-2 text-14-regular leading-6 text-text-strong">{listContent()}</ol>
++      </Show>
 +    </NodeFrame>
 +  )
 +}
