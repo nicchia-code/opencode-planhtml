@@ -2730,7 +2730,7 @@ index 000000000..0e9616b41
 +}
 
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 2482e40fb..f8f5e53e5 100644
+index 2482e40fb..387592542 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
 @@ -3,6 +3,7 @@ import * as Stream from "effect/Stream"
@@ -2749,11 +2749,16 @@ index 2482e40fb..f8f5e53e5 100644
  import { PartID } from "./schema"
  import type { SessionID } from "./schema"
  import { SessionRetry } from "./retry"
-@@ -407,6 +409,36 @@ export namespace SessionProcessor {
+@@ -407,6 +409,41 @@ export namespace SessionProcessor {
            }
            ctx.assistantMessage.time.completed = Date.now()
            yield* session.updateMessage(ctx.assistantMessage)
-+          if (!Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && ctx.assistantMessage.agent === "plan" && !ctx.assistantMessage.error) {
++          if (
++            !Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE &&
++            ctx.assistantMessage.agent === "plan" &&
++            ctx.assistantMessage.finish === "stop" &&
++            !ctx.assistantMessage.error
++          ) {
 +            yield* Effect.gen(function* () {
 +              const markdown = SessionPlanHtml.markdownFromParts(parts)
 +              if (!markdown) return
