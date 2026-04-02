@@ -637,10 +637,10 @@ index 000000000..19c96ad0f
 
 diff --git a/packages/app/src/pages/session-plan.test.tsx b/packages/app/src/pages/session-plan.test.tsx
 new file mode 100644
-index 000000000..9a1112e41
+index 000000000..8cb5bdcc3
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.test.tsx
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,234 @@
 +import { beforeAll, describe, expect, mock, test } from "bun:test"
 +import fs from "node:fs"
 +
@@ -840,6 +840,14 @@ index 000000000..9a1112e41
 +    expect(source).toContain('list-outside list-decimal')
 +  })
 +
++  test("hides the Internal Plan section only in the review UI while keeping Actions hidden as a heading", () => {
++    const source = fs.readFileSync(new URL("./session-plan.tsx", import.meta.url), "utf8")
++
++    expect(source).toContain('node.kind === "heading" && node.text.trim().toLowerCase() === "internal plan"')
++    expect(source).toContain('hiddenSectionLevel = node.level')
++    expect(source).toContain('return node.text.trim().toLowerCase() === "actions"')
++  })
++
 +  test("renders inline bold markdown as strong text in the review page", () => {
 +    const source = fs.readFileSync(new URL("./session-plan.tsx", import.meta.url), "utf8")
 +
@@ -856,15 +864,26 @@ index 000000000..9a1112e41
 +    expect(source).toContain('bodyStyle.minHeight = "100vh"')
 +    expect(source).toContain('htmlStyle.backgroundColor = REVIEW_BACKGROUND')
 +  })
++
++  test("shows an explicit spinner while the plan loads or refreshes", () => {
++    const source = fs.readFileSync(new URL("./session-plan.tsx", import.meta.url), "utf8")
++
++    expect(source).toContain('import { Spinner } from "@opencode-ai/ui/spinner"')
++    expect(source).toContain('const refreshingPlan = createMemo(() => Boolean(pendingRevisionID()))')
++    expect(source).toContain('<Spinner class="size-6 text-[#2f76d2]" />')
++    expect(source).toContain('Generating revised plan')
++    expect(source).toContain('Refreshing the plan with your comments...')
++  })
 +})
 
 diff --git a/packages/app/src/pages/session-plan.tsx b/packages/app/src/pages/session-plan.tsx
 new file mode 100644
-index 000000000..6267a0e0f
+index 000000000..93ecf1c04
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.tsx
-@@ -0,0 +1,794 @@
+@@ -0,0 +1,840 @@
 +import { Button } from "@opencode-ai/ui/button"
++import { Spinner } from "@opencode-ai/ui/spinner"
 +import { showToast } from "@opencode-ai/ui/toast"
 +import { useSearchParams, useParams } from "@solidjs/router"
 +import { createEffect, createMemo, createResource, createSignal, For, Match, onCleanup, onMount, Show, Switch, type Accessor, type JSX } from "solid-js"
@@ -1081,10 +1100,10 @@ index 000000000..6267a0e0f
 +
 +function isHiddenReviewNode(node: PlanUserNode) {
 +  if (node.kind === "heading") {
-+    return ["actions", "internal plan"].includes(node.text.trim().toLowerCase())
++    return node.text.trim().toLowerCase() === "actions"
 +  }
 +  if (node.kind === "paragraph") {
-+    return ["internal plan", "actions"].includes(visibleInlineText(node.text).trim().toLowerCase())
++    return ["actions"].includes(visibleInlineText(node.text).trim().toLowerCase())
 +  }
 +  return false
 +}
@@ -1092,10 +1111,31 @@ index 000000000..6267a0e0f
 +function groupReviewNodes(nodes: PlanUserNode[]) {
 +  const groups: Array<{ kind: "node"; node: PlanUserNode } | { kind: "fields"; nodes: PlanUserParagraphNode[] }> = []
 +  let index = 0
++  let hiddenSectionLevel: number | null = null
 +
 +  while (index < nodes.length) {
 +    const node = nodes[index]
-+    if (!node || isHiddenReviewNode(node)) {
++    if (!node) {
++      index += 1
++      continue
++    }
++
++    if (hiddenSectionLevel !== null) {
++      if (node.kind === "heading" && node.level <= hiddenSectionLevel) {
++        hiddenSectionLevel = null
++      } else {
++        index += 1
++        continue
++      }
++    }
++
++    if (node.kind === "heading" && node.text.trim().toLowerCase() === "internal plan") {
++      hiddenSectionLevel = node.level
++      index += 1
++      continue
++    }
++
++    if (isHiddenReviewNode(node)) {
 +      index += 1
 +      continue
 +    }
@@ -1360,6 +1400,7 @@ index 000000000..6267a0e0f
 +  const [status, setStatus] = createSignal<string>()
 +  const [busy, setBusy] = createSignal(false)
 +  const [pendingRevisionID, setPendingRevisionID] = createSignal<string | null>(null)
++  const refreshingPlan = createMemo(() => Boolean(pendingRevisionID()))
 +
 +  const api = async <T,>(pathname: string, init?: RequestInit): Promise<T> => {
 +    const url = new URL(pathname, window.location.origin)
@@ -1524,8 +1565,11 @@ index 000000000..6267a0e0f
 +          <div class="mx-auto max-w-[820px] space-y-8">
 +          <Switch>
 +            <Match when={plan.loading}>
-+              <div class="rounded-[24px] border border-[rgba(55,53,47,0.08)] bg-white px-6 py-6 text-[14px] text-[#787774] shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-+                Loading plan review...
++              <div class="rounded-[24px] border border-[rgba(55,53,47,0.08)] bg-white px-6 py-10 text-[14px] text-[#787774] shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
++                <div class="flex flex-col items-center gap-3 text-center">
++                  <Spinner class="size-6 text-[#2f76d2]" />
++                  <div class="font-medium text-[#2f3437]">Loading plan review...</div>
++                </div>
 +              </div>
 +            </Match>
 +            <Match when={plan.error}>
@@ -1542,6 +1586,18 @@ index 000000000..6267a0e0f
 +                    Review revision <code>{plan()!.document.planRevisionID.slice(0, 12)}</code> from <code>{plan()!.sourcePath}</code>
 +                  </div>
 +                </header>
++
++                <Show when={refreshingPlan()}>
++                  <div class="rounded-[24px] border border-[rgba(47,118,210,0.18)] bg-white px-5 py-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
++                    <div class="flex items-center gap-3 text-[#2f3437]">
++                      <Spinner class="size-5 text-[#2f76d2]" />
++                      <div>
++                        <div class="text-[14px] font-semibold">Generating revised plan</div>
++                        <div class="text-[13px] text-[#787774]">The page will refresh automatically as soon as the new revision is ready.</div>
++                      </div>
++                    </div>
++                  </div>
++                </Show>
 +
 +                <PlanDocumentView
 +                  document={plan()!.document}
@@ -1561,6 +1617,14 @@ index 000000000..6267a0e0f
 +            </div>
 +            <Show when={status()}>
 +              <div class="mt-3 rounded-2xl border border-[rgba(55,53,47,0.06)] bg-[#f7f6f3] px-3 py-3 text-[12px] leading-5 text-[#6f6e69]">{status()}</div>
++            </Show>
++            <Show when={refreshingPlan()}>
++              <div class="mt-3 rounded-2xl border border-[rgba(47,118,210,0.14)] bg-[rgba(47,118,210,0.05)] px-3 py-3">
++                <div class="flex items-center gap-3 text-[13px] text-[#2f3437]">
++                  <Spinner class="size-4 text-[#2f76d2]" />
++                  <span>Refreshing the plan with your comments...</span>
++                </div>
++              </div>
 +            </Show>
 +            <div class="mt-4 flex flex-col gap-2">
 +              <Button disabled={busy() || Boolean(pendingRevisionID())} onClick={() => void submitReplan()}>
@@ -3230,10 +3294,10 @@ index 000000000..82e97392d
 
 diff --git a/packages/opencode/src/session/plan-user.ts b/packages/opencode/src/session/plan-user.ts
 new file mode 100644
-index 000000000..b71582fd5
+index 000000000..fbc3bdd32
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-user.ts
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,420 @@
 +import { createHash } from "node:crypto"
 +import path from "node:path"
 +
@@ -3312,11 +3376,6 @@ index 000000000..b71582fd5
 +  /\bas\s+above\b/i,
 +]
 +
-+const HIDDEN_STANDALONE_LINES = [
-+  /^(?:\*\*)?internal plan(?:\*\*)?$/i,
-+  /^(?:\*\*)?actions(?:\*\*)?$/i,
-+]
-+
 +function escapeHtml(value: string): string {
 +  return value
 +    .replace(/&/g, "&amp;")
@@ -3356,13 +3415,6 @@ index 000000000..b71582fd5
 +  return normalize(markdown)
 +    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "")
 +    .split(/\r?\n/)
-+    .filter((line) => {
-+      const trimmed = line.trim()
-+      if (!trimmed) return true
-+      if (/^#{1,6}\s+actions\s*$/i.test(trimmed)) return false
-+      if (/^#{1,6}\s+internal plan\s*$/i.test(trimmed)) return false
-+      return !HIDDEN_STANDALONE_LINES.some((pattern) => pattern.test(trimmed))
-+    })
 +    .join("\n")
 +    .replace(/\n{3,}/g, "\n\n")
 +    .trim()
@@ -4959,7 +5011,7 @@ index 000000000..784aaf3ab
 
 diff --git a/packages/opencode/test/session/plan-user.test.ts b/packages/opencode/test/session/plan-user.test.ts
 new file mode 100644
-index 000000000..5e64124d4
+index 000000000..81efbd38d
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-user.test.ts
 @@ -0,0 +1,103 @@
@@ -5029,18 +5081,18 @@ index 000000000..5e64124d4
 +    expect(derived).toContain("# Goal")
 +    expect(derived).toContain("# Piano Razionale")
 +    expect(derived).not.toContain("# Plan Rationale")
-+    expect(derived).not.toContain("# Actions")
++    expect(derived).toContain("# Actions")
 +    expect(() => SessionPlanUser.buildPlanUserDocument(derived, ".opencode/plans/example.user.md")).not.toThrow()
 +  })
 +
-+  test("sanitizes hidden operational sections from the user-facing plan", () => {
++  test("sanitizes only system reminders from the user-facing plan", () => {
 +    const sanitized = SessionPlanUser.sanitizeUserPlanMarkdown(`# Goal\n\nVisible.\n\n**Internal Plan**\n\n<system-reminder>hidden</system-reminder>\n\n# Actions\n\n## Step 1\nWhat: Visible row`)
 +
 +    expect(sanitized).toContain("# Goal")
++    expect(sanitized).toContain("**Internal Plan**")
++    expect(sanitized).toContain("# Actions")
 +    expect(sanitized).toContain("## Step 1")
-+    expect(sanitized).not.toContain("Internal Plan")
 +    expect(sanitized).not.toContain("system-reminder")
-+    expect(sanitized).not.toContain("# Actions")
 +  })
 +
 +  test("renders markdown bold in the fallback html snapshot", () => {
