@@ -1547,10 +1547,10 @@ index 000000000..fc7df6a6e
 
 diff --git a/packages/opencode/src/session/plan-control.ts b/packages/opencode/src/session/plan-control.ts
 new file mode 100644
-index 000000000..4205fab6b
+index 000000000..29b491a68
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-control.ts
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,32 @@
 +import type { SessionID } from "@/session/schema"
 +import { Instance } from "@/project/instance"
 +
@@ -1573,16 +1573,20 @@ index 000000000..4205fab6b
 +  return current ? { ...current } : undefined
 +}
 +
++export function getPlanServerDirectory() {
++  return Instance.worktree === "/" ? Instance.directory : Instance.worktree
++}
++
 +export function getPlanServerUrl(sessionID: SessionID) {
 +  if (!current) return
-+  const url = new URL(`/${encodeDirectory(Instance.worktree)}/session/${sessionID}/plan`, current.url)
++  const url = new URL(`/${encodeDirectory(getPlanServerDirectory())}/session/${sessionID}/plan`, current.url)
 +  url.searchParams.set("plan-token", current.token)
 +  return url.toString()
 +}
 
 diff --git a/packages/opencode/src/session/plan-html.ts b/packages/opencode/src/session/plan-html.ts
 new file mode 100644
-index 000000000..86557efce
+index 000000000..acadf85cc
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-html.ts
 @@ -0,0 +1,705 @@
@@ -1598,7 +1602,7 @@ index 000000000..86557efce
 +import { PartID, type MessageID, type SessionID } from "@/session/schema"
 +import { Process } from "@/util/process"
 +import { which } from "@/util/which"
-+import { getPlanServerUrl } from "./plan-control"
++import { getPlanServerDirectory, getPlanServerUrl } from "./plan-control"
 +import { Session } from "./index"
 +import type { MessageV2 } from "./message-v2"
 +import * as SessionPlanUser from "./plan-user"
@@ -2182,7 +2186,7 @@ index 000000000..86557efce
 +  if (existing) return existing
 +
 +  const [{ Instance }, { PlanServer }] = await Promise.all([import("../project/instance"), import("./plan-server")])
-+  PlanServer.ensure({ directory: Instance.worktree })
++  PlanServer.ensure({ directory: getPlanServerDirectory() })
 +  const liveUrl = getPlanServerUrl(sessionID)
 +  if (liveUrl) return liveUrl
 +
@@ -3657,16 +3661,17 @@ index 000000000..d50fe1385
 
 diff --git a/packages/opencode/test/session/plan-html.test.ts b/packages/opencode/test/session/plan-html.test.ts
 new file mode 100644
-index 000000000..f300d3ad7
+index 000000000..20aedec1e
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-html.test.ts
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,327 @@
 +import { afterEach, describe, expect, spyOn, test } from "bun:test"
 +import fs from "node:fs/promises"
 +import path from "node:path"
 +
 +import { Session } from "../../src/session"
 +import * as SessionPlanHtml from "../../src/session/plan-html"
++import { getPlanServerDirectory } from "../../src/session/plan-control"
 +import { PlanServer } from "../../src/session/plan-server"
 +import { MessageV2 } from "../../src/session/message-v2"
 +import { MessageID, PartID, SessionID } from "../../src/session/schema"
@@ -3888,6 +3893,30 @@ index 000000000..f300d3ad7
 +        expect(artifacts.liveUrl).toBeTruthy()
 +        expect(new URL(artifacts.liveUrl!).pathname).toContain(`/session/${session.id}/plan`)
 +        expect(new URL(artifacts.liveUrl!).searchParams.get("plan-token")).toBeTruthy()
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++
++  test("uses the real project directory for non-git live review urls", async () => {
++    await using tmp = await tmpdir()
++
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        const artifacts = await SessionPlanHtml.renderPlanArtifacts({
++          session,
++          markdown: SAMPLE_PLAN,
++          userMarkdown: SAMPLE_USER_PLAN,
++          autoOpen: false,
++        })
++
++        expect(getPlanServerDirectory()).toBe(tmp.path)
++
++        const encodedDir = new URL(artifacts.liveUrl!).pathname.split("/")[1]
++        expect(Buffer.from(encodedDir.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8")).toBe(tmp.path)
 +
 +        await Session.remove(session.id)
 +      },
