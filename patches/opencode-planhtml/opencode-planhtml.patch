@@ -973,10 +973,10 @@ index 4bb6efaf9..be15bdf93 100644
 
 diff --git a/packages/opencode/src/server/routes/session-plan.ts b/packages/opencode/src/server/routes/session-plan.ts
 new file mode 100644
-index 000000000..a7d0ea942
+index 000000000..c83025e1b
 --- /dev/null
 +++ b/packages/opencode/src/server/routes/session-plan.ts
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,151 @@
 +import fs from "node:fs/promises"
 +import { Hono } from "hono"
 +import { describeRoute, resolver, validator } from "hono-openapi"
@@ -1017,13 +1017,28 @@ index 000000000..a7d0ea942
 +        const sessionID = c.req.valid("param").sessionID
 +        const session = await Session.get(sessionID)
 +        const sourcePath = Session.planUser(session)
-+        const markdown = await fs.readFile(sourcePath, "utf8")
-+        const document = SessionPlanUser.buildPlanUserDocument(markdown, sourcePath)
-+        return c.json({
-+          document,
-+          markdown,
-+          sourcePath,
-+        })
++        try {
++          const markdown = await fs.readFile(sourcePath, "utf8")
++          const document = SessionPlanUser.buildPlanUserDocument(markdown, sourcePath)
++          return c.json({
++            document,
++            markdown,
++            sourcePath,
++          })
++        } catch (error) {
++          if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
++            try {
++              const planMarkdown = await fs.readFile(Session.plan(session), "utf8")
++              if (SessionPlanHtml.isPlanReadyForOpen(planMarkdown)) {
++                return c.json({ error: "user_plan_missing" }, 409)
++              }
++            } catch (planError) {
++              if ((planError as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw planError
++            }
++            return c.json({ error: "plan_not_found" }, 404)
++          }
++          throw error
++        }
 +      },
 +    )
 +    .get("/:sessionID/plan", validator("param", params), async (c) => {
@@ -1066,6 +1081,9 @@ index 000000000..a7d0ea942
 +          const result = await SessionPlanAction.requestPlanRevision(sessionID, c.req.valid("json"))
 +          return c.json(result)
 +        } catch (error) {
++          if (error instanceof SessionPlanHtml.MissingUserPlanError) {
++            return c.json({ error: "user_plan_missing" }, 409)
++          }
 +          if (error instanceof SessionPlanAction.StalePlanRevisionError) {
 +            return c.json(
 +              {
@@ -1090,6 +1108,9 @@ index 000000000..a7d0ea942
 +          const result = await SessionPlanAction.proceedPlan(sessionID, c.req.valid("json"))
 +          return c.json(result)
 +        } catch (error) {
++          if (error instanceof SessionPlanHtml.MissingUserPlanError) {
++            return c.json({ error: "user_plan_missing" }, 409)
++          }
 +          if (error instanceof SessionPlanAction.StalePlanRevisionError) {
 +            return c.json(
 +              {
@@ -1138,10 +1159,10 @@ index 5ed5acafa..5885faf4a 100644
 
 diff --git a/packages/opencode/src/session/plan-action.ts b/packages/opencode/src/session/plan-action.ts
 new file mode 100644
-index 000000000..352051d3f
+index 000000000..b88331e1a
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-action.ts
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,337 @@
 +import fs from "node:fs/promises"
 +import path from "node:path"
 +import { setTimeout as sleep } from "node:timers/promises"
@@ -1243,6 +1264,13 @@ index 000000000..352051d3f
 +  } catch (error) {
 +    if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw error
 +  }
++
++  SessionPlanHtml.assertReadyPlanHasUserFacingPlan({
++    ready: SessionPlanHtml.isPlanReadyForOpen(markdown),
++    sessionID,
++    userMarkdown: user?.markdown,
++    userMarkdownPath: userSourcePath,
++  })
 +
 +  return { session, sourcePath, markdown, document, user }
 +}
@@ -1510,10 +1538,10 @@ index 000000000..4205fab6b
 
 diff --git a/packages/opencode/src/session/plan-html.ts b/packages/opencode/src/session/plan-html.ts
 new file mode 100644
-index 000000000..75ca3b3c7
+index 000000000..0e13cd95c
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-html.ts
-@@ -0,0 +1,675 @@
+@@ -0,0 +1,701 @@
 +import fs from "node:fs/promises"
 +import { createHash } from "node:crypto"
 +import { release } from "node:os"
@@ -1565,6 +1593,15 @@ index 000000000..75ca3b3c7
 +  leadHtml: string
 +  sections: PlanSection[]
 +  summaryRows: PlanSummaryRow[]
++}
++
++export class MissingUserPlanError extends Error {
++  constructor(
++    readonly sessionID: SessionID,
++    readonly userMarkdownPath: string,
++  ) {
++    super(`ready plan is missing user-facing plan at ${userMarkdownPath}`)
++  }
 +}
 +
 +const SUMMARY_EXCLUDED_TITLES = new Set([
@@ -2108,6 +2145,16 @@ index 000000000..75ca3b3c7
 +  throw new Error(`plan live review URL unavailable for session ${sessionID}`)
 +}
 +
++export function assertReadyPlanHasUserFacingPlan(input: {
++  ready: boolean
++  sessionID: SessionID
++  userMarkdown?: string
++  userMarkdownPath: string
++}) {
++  if (!input.ready || input.userMarkdown) return
++  throw new MissingUserPlanError(input.sessionID, input.userMarkdownPath)
++}
++
 +export async function renderPlanArtifacts(input: {
 +  session: Session.Info
 +  markdown: string
@@ -2140,6 +2187,13 @@ index 000000000..75ca3b3c7
 +    await fs.mkdir(path.dirname(userMarkdownPath), { recursive: true })
 +    await fs.writeFile(userMarkdownPath, userMarkdown, "utf8")
 +  }
++
++  assertReadyPlanHasUserFacingPlan({
++    ready,
++    sessionID: input.session.id,
++    userMarkdown,
++    userMarkdownPath,
++  })
 +
 +  let htmlPath = Session.planHtml(input.session)
 +  let hash = planHash(input.markdown)
@@ -2941,10 +2995,10 @@ index 000000000..fe850eb16
 +</system-reminder>
 
 diff --git a/packages/opencode/src/tool/plan.ts b/packages/opencode/src/tool/plan.ts
-index e91bc3faa..e6712fce0 100644
+index e91bc3faa..da893036a 100644
 --- a/packages/opencode/src/tool/plan.ts
 +++ b/packages/opencode/src/tool/plan.ts
-@@ -3,30 +3,40 @@ import path from "path"
+@@ -3,30 +3,41 @@ import path from "path"
  import { Tool } from "./tool"
  import { Question } from "../question"
  import { Session } from "../session"
@@ -2983,7 +3037,8 @@ index e91bc3faa..e6712fce0 100644
 +          }),
 +        )
 +      }
-+    } catch {
++    } catch (error) {
++      if (error instanceof SessionPlanHtml.MissingUserPlanError) throw error
 +      planView = undefined
 +    }
 +
@@ -2996,7 +3051,7 @@ index e91bc3faa..e6712fce0 100644
            header: "Build Agent",
            custom: false,
            options: [
-@@ -41,27 +51,7 @@ export const PlanExitTool = Tool.define("plan_exit", {
+@@ -41,27 +52,7 @@ export const PlanExitTool = Tool.define("plan_exit", {
      const answer = answers[0]?.[0]
      if (answer === "No") throw new Question.RejectedError()
  
@@ -3028,10 +3083,10 @@ index e91bc3faa..e6712fce0 100644
 
 diff --git a/packages/opencode/test/server/session-plan.test.ts b/packages/opencode/test/server/session-plan.test.ts
 new file mode 100644
-index 000000000..db46c2513
+index 000000000..109d7b4f8
 --- /dev/null
 +++ b/packages/opencode/test/server/session-plan.test.ts
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,478 @@
 +import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 +
 +import { Instance } from "../../src/project/instance"
@@ -3097,7 +3152,12 @@ index 000000000..db46c2513
 +      directory: tmp.path,
 +      fn: async () => {
 +        const session = await Session.create({})
-+        await SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })
++        await SessionPlanHtml.renderPlanArtifacts({
++          session,
++          markdown: SAMPLE_PLAN,
++          userMarkdown: SAMPLE_USER_PLAN,
++          autoOpen: false,
++        })
 +        const app = Server.Default()
 +
 +        const res = await app.request(`/session/${session.id}/plan`, {
@@ -3156,13 +3216,48 @@ index 000000000..db46c2513
 +    })
 +  })
 +
++  test("returns a controlled error when a ready plan is missing the user-facing document", async () => {
++    await using tmp = await tmpdir({ git: true })
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        await expect(SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })).rejects.toThrow(
++          "user-facing plan",
++        )
++        const app = Server.Default()
++
++        const res = await app.request(`/session/${session.id}/plan/user`, {
++          method: "GET",
++          headers: {
++            "x-opencode-directory": tmp.path,
++          },
++        })
++
++        expect(res.status).toBe(409)
++        expect(await res.json()).toEqual(
++          expect.objectContaining({
++            error: "user_plan_missing",
++          }),
++        )
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++
 +  test("queues replan and answers the pending build question with No", async () => {
 +    await using tmp = await tmpdir({ git: true })
 +    await Instance.provide({
 +      directory: tmp.path,
 +      fn: async () => {
 +        const session = await Session.create({})
-+        await SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })
++        const artifacts = await SessionPlanHtml.renderPlanArtifacts({
++          session,
++          markdown: SAMPLE_PLAN,
++          userMarkdown: SAMPLE_USER_PLAN,
++          autoOpen: false,
++        })
 +        const document = SessionPlanHtml.buildPlanDocument(SAMPLE_PLAN, Session.plan(session))
 +        const prompt = spyOn(SessionPrompt, "prompt").mockResolvedValue({ info: {} as never, parts: [] })
 +        const askPromise = Question.ask({
@@ -3188,7 +3283,7 @@ index 000000000..db46c2513
 +            "x-opencode-directory": tmp.path,
 +          },
 +          body: JSON.stringify({
-+            planRevisionID: document.planRevisionID,
++            planRevisionID: artifacts.hash,
 +            comments: [
 +              {
 +                sectionID: "step-1-analyze-the-current-plan-output",
@@ -3268,14 +3363,60 @@ index 000000000..db46c2513
 +    })
 +  })
 +
++  test("rejects replan when a ready plan is missing the user-facing document", async () => {
++    await using tmp = await tmpdir({ git: true })
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        await expect(SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })).rejects.toThrow(
++          "user-facing plan",
++        )
++        const document = SessionPlanHtml.buildPlanDocument(SAMPLE_PLAN, Session.plan(session))
++        const app = Server.Default()
++
++        const res = await app.request(`/session/${session.id}/plan/replan`, {
++          method: "POST",
++          headers: {
++            "content-type": "application/json",
++            "x-opencode-directory": tmp.path,
++          },
++          body: JSON.stringify({
++            planRevisionID: document.planRevisionID,
++            comments: [
++              {
++                sectionID: "step-1-analyze-the-current-plan-output",
++                title: "Step 1: Analyze the current plan output",
++                note: "Tighten this step and make the verification more explicit.",
++              },
++            ],
++          }),
++        })
++
++        expect(res.status).toBe(409)
++        expect(await res.json()).toEqual(
++          expect.objectContaining({
++            error: "user_plan_missing",
++          }),
++        )
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++
 +  test("proceed answers the pending build question with Yes", async () => {
 +    await using tmp = await tmpdir({ git: true })
 +    await Instance.provide({
 +      directory: tmp.path,
 +      fn: async () => {
 +        const session = await Session.create({})
-+        await SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })
-+        const document = SessionPlanHtml.buildPlanDocument(SAMPLE_PLAN, Session.plan(session))
++        const artifacts = await SessionPlanHtml.renderPlanArtifacts({
++          session,
++          markdown: SAMPLE_PLAN,
++          userMarkdown: SAMPLE_USER_PLAN,
++          autoOpen: false,
++        })
 +        const askPromise = Question.ask({
 +          sessionID: session.id,
 +          questions: [
@@ -3299,7 +3440,7 @@ index 000000000..db46c2513
 +            "x-opencode-directory": tmp.path,
 +          },
 +          body: JSON.stringify({
-+            planRevisionID: document.planRevisionID,
++            planRevisionID: artifacts.hash,
 +          }),
 +        })
 +
@@ -3317,7 +3458,12 @@ index 000000000..db46c2513
 +      directory: tmp.path,
 +      fn: async () => {
 +        const session = await Session.create({})
-+        await SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })
++        await SessionPlanHtml.renderPlanArtifacts({
++          session,
++          markdown: SAMPLE_PLAN,
++          userMarkdown: SAMPLE_USER_PLAN,
++          autoOpen: false,
++        })
 +        const app = Server.Default()
 +
 +        const res = await app.request(`/session/${session.id}/plan/replan`, {
@@ -3350,15 +3496,16 @@ index 000000000..db46c2513
 +    })
 +  })
 +
-+  test("falls back to direct approval when no build question is pending", async () => {
++  test("rejects proceed when a ready plan is missing the user-facing document", async () => {
 +    await using tmp = await tmpdir({ git: true })
 +    await Instance.provide({
 +      directory: tmp.path,
 +      fn: async () => {
 +        const session = await Session.create({})
-+        await SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })
++        await expect(SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })).rejects.toThrow(
++          "user-facing plan",
++        )
 +        const document = SessionPlanHtml.buildPlanDocument(SAMPLE_PLAN, Session.plan(session))
-+        const proceed = spyOn(SessionPlanAction, "proceedPlan")
 +        const app = Server.Default()
 +
 +        const res = await app.request(`/session/${session.id}/plan/proceed`, {
@@ -3372,8 +3519,46 @@ index 000000000..db46c2513
 +          }),
 +        })
 +
++        expect(res.status).toBe(409)
++        expect(await res.json()).toEqual(
++          expect.objectContaining({
++            error: "user_plan_missing",
++          }),
++        )
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++
++  test("falls back to direct approval when no build question is pending", async () => {
++    await using tmp = await tmpdir({ git: true })
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        const artifacts = await SessionPlanHtml.renderPlanArtifacts({
++          session,
++          markdown: SAMPLE_PLAN,
++          userMarkdown: SAMPLE_USER_PLAN,
++          autoOpen: false,
++        })
++        const proceed = spyOn(SessionPlanAction, "proceedPlan")
++        const app = Server.Default()
++
++        const res = await app.request(`/session/${session.id}/plan/proceed`, {
++          method: "POST",
++          headers: {
++            "content-type": "application/json",
++            "x-opencode-directory": tmp.path,
++          },
++          body: JSON.stringify({
++            planRevisionID: artifacts.hash,
++          }),
++        })
++
 +        expect(res.status).toBe(200)
-+        expect(proceed).toHaveBeenCalledWith(session.id, { planRevisionID: document.planRevisionID })
++        expect(proceed).toHaveBeenCalledWith(session.id, { planRevisionID: artifacts.hash })
 +
 +        await Session.remove(session.id)
 +      },
@@ -3383,10 +3568,10 @@ index 000000000..db46c2513
 
 diff --git a/packages/opencode/test/session/plan-html.test.ts b/packages/opencode/test/session/plan-html.test.ts
 new file mode 100644
-index 000000000..914efcc44
+index 000000000..42380627f
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-html.test.ts
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,256 @@
 +import { afterEach, describe, expect, spyOn, test } from "bun:test"
 +import fs from "node:fs/promises"
 +import path from "node:path"
@@ -3544,6 +3729,7 @@ index 000000000..914efcc44
 +
 +  test("writes markdown and html artifacts next to the session plan path", async () => {
 +    await using tmp = await tmpdir({ git: true })
++    const incompletePlan = `# Goal\nDraft only\n\n# Plan Rationale\nStill exploring.`
 +
 +    await Instance.provide({
 +      directory: tmp.path,
@@ -3551,21 +3737,44 @@ index 000000000..914efcc44
 +        const session = await Session.create({})
 +        const artifacts = await SessionPlanHtml.renderPlanArtifacts({
 +          session,
-+          markdown: SAMPLE_PLAN,
++          markdown: incompletePlan,
 +          autoOpen: false,
 +        })
 +
 +        expect(artifacts.markdownPath.endsWith(".md")).toBe(true)
 +        expect(artifacts.htmlPath.endsWith(".html")).toBe(true)
-+        expect(artifacts.ready).toBe(true)
++        expect(artifacts.ready).toBe(false)
 +        expect(path.dirname(artifacts.markdownPath)).toBe(path.dirname(artifacts.htmlPath))
 +
 +        const markdown = await fs.readFile(artifacts.markdownPath, "utf8")
 +        const html = await fs.readFile(artifacts.htmlPath, "utf8")
 +
-+        expect(markdown).toBe(SAMPLE_PLAN)
-+        expect(html).toContain("Plan Summary")
++        expect(markdown).toBe(incompletePlan)
++        expect(html).not.toContain("Plan Summary")
 +        expect(html).toContain(path.basename(artifacts.markdownPath))
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++
++  test("rejects ready plans when the user-facing plan is missing", async () => {
++    await using tmp = await tmpdir({ git: true })
++
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++
++        await expect(
++          SessionPlanHtml.renderPlanArtifacts({
++            session,
++            markdown: SAMPLE_PLAN,
++            autoOpen: false,
++          }),
++        ).rejects.toThrow("user-facing plan")
++
++        expect(await fs.readFile(Session.plan(session), "utf8")).toBe(SAMPLE_PLAN)
 +
 +        await Session.remove(session.id)
 +      },
