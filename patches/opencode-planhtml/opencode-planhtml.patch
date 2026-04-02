@@ -294,10 +294,10 @@ index 000000000..19c96ad0f
 
 diff --git a/packages/app/src/pages/session-plan.test.tsx b/packages/app/src/pages/session-plan.test.tsx
 new file mode 100644
-index 000000000..6e7b04234
+index 000000000..0f0bb897d
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.test.tsx
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,155 @@
 +import { beforeAll, describe, expect, mock, test } from "bun:test"
 +import fs from "node:fs"
 +
@@ -306,6 +306,7 @@ index 000000000..6e7b04234
 +let PlanDocumentView: typeof import("./session-plan").PlanDocumentView
 +let resolveSelectionAnchor: typeof import("./session-plan").resolveSelectionAnchor
 +let highlightText: typeof import("./session-plan").highlightText
++let hasPlanRevisionUpdated: typeof import("./session-plan").hasPlanRevisionUpdated
 +
 +beforeAll(async () => {
 +  mock.module("@solidjs/router", () => ({
@@ -336,6 +337,7 @@ index 000000000..6e7b04234
 +  PlanDocumentView = mod.PlanDocumentView
 +  resolveSelectionAnchor = mod.resolveSelectionAnchor
 +  highlightText = mod.highlightText
++  hasPlanRevisionUpdated = mod.hasPlanRevisionUpdated
 +})
 +
 +const SAMPLE_DOCUMENT: PlanUserDocument = {
@@ -436,18 +438,32 @@ index 000000000..6e7b04234
 +    expect(source).toContain("<ol class=")
 +    expect(source).not.toContain('const Tag = (props.node.ordered ? "ol" : "ul")')
 +  })
++
++  test("detects when a refreshed plan revision has replaced the one under review", () => {
++    expect(hasPlanRevisionUpdated("next-revision", "current-revision")).toBe(true)
++    expect(hasPlanRevisionUpdated("current-revision", "current-revision")).toBe(false)
++    expect(hasPlanRevisionUpdated(undefined, "current-revision")).toBe(false)
++  })
++
++  test("polls for a new plan revision after sending a replan request", () => {
++    const source = fs.readFileSync(new URL("./session-plan.tsx", import.meta.url), "utf8")
++
++    expect(source).toContain("window.setInterval")
++    expect(source).toContain("setPendingRevisionID(document.planRevisionID)")
++    expect(source).toContain("window.scrollTo({ top: 0, behavior: \"smooth\" })")
++  })
 +})
 
 diff --git a/packages/app/src/pages/session-plan.tsx b/packages/app/src/pages/session-plan.tsx
 new file mode 100644
-index 000000000..03b554fc9
+index 000000000..a16404268
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.tsx
-@@ -0,0 +1,472 @@
+@@ -0,0 +1,504 @@
 +import { Button } from "@opencode-ai/ui/button"
 +import { showToast } from "@opencode-ai/ui/toast"
 +import { useSearchParams, useParams } from "@solidjs/router"
-+import { createMemo, createResource, createSignal, For, Match, onMount, Show, Switch, type Accessor, type JSX } from "solid-js"
++import { createEffect, createMemo, createResource, createSignal, For, Match, onCleanup, onMount, Show, Switch, type Accessor, type JSX } from "solid-js"
 +
 +import { createPlanCommentSession, type PlanComment } from "@/context/plan-comments"
 +import type { PlanCommentAnchor } from "@/context/plan-comments"
@@ -684,6 +700,10 @@ index 000000000..03b554fc9
 +  }
 +}
 +
++export function hasPlanRevisionUpdated(currentRevisionID?: string, pendingRevisionID?: string | null) {
++  return Boolean(currentRevisionID && pendingRevisionID && currentRevisionID !== pendingRevisionID)
++}
++
 +function describeAnchor(anchor: PlanCommentAnchor) {
 +  if (anchor.kind === "node") return `Node ${anchor.nodeID}`
 +  return anchor.quote
@@ -699,6 +719,7 @@ index 000000000..03b554fc9
 +  const [draftComment, setDraftComment] = createSignal("")
 +  const [status, setStatus] = createSignal<string>()
 +  const [busy, setBusy] = createSignal(false)
++  const [pendingRevisionID, setPendingRevisionID] = createSignal<string | null>(null)
 +
 +  const api = async <T,>(pathname: string, init?: RequestInit): Promise<T> => {
 +    const url = new URL(pathname, window.location.origin)
@@ -737,6 +758,31 @@ index 000000000..03b554fc9
 +    }
 +  })
 +
++  createEffect(() => {
++    const pending = pendingRevisionID()
++    if (!pending) return
++
++    const interval = window.setInterval(() => {
++      void refetch()
++    }, 1500)
++
++    onCleanup(() => window.clearInterval(interval))
++  })
++
++  createEffect(() => {
++    if (!hasPlanRevisionUpdated(plan()?.document.planRevisionID, pendingRevisionID())) return
++
++    setPendingRevisionID(null)
++    setStatus("A revised plan is ready. Review the updated version below.")
++    setDraftAnchor(null)
++    setDraftComment("")
++    window.scrollTo({ top: 0, behavior: "smooth" })
++    showToast({
++      title: "Updated plan ready",
++      description: "OpenCode finished drafting the revised plan.",
++    })
++  })
++
 +  const submitReplan = async () => {
 +    const document = plan()?.document
 +    if (!document) return
@@ -762,12 +808,14 @@ index 000000000..03b554fc9
 +      planComments().clear()
 +      setDraftAnchor(null)
 +      setDraftComment("")
-+      setStatus("Revision request sent. OpenCode is refreshing both plans.")
++      setPendingRevisionID(document.planRevisionID)
++      setStatus("Revision request sent. Waiting for the refreshed plan...")
 +      showToast({
 +        title: "Plan revision requested",
 +        description: "OpenCode is regenerating a fresh internal plan and a fresh user-facing plan.",
 +      })
 +    } catch (error) {
++      setPendingRevisionID(null)
 +      setStatus(error instanceof Error ? error.message : String(error))
 +    } finally {
 +      setBusy(false)
@@ -855,10 +903,10 @@ index 000000000..03b554fc9
 +              <div class="mt-3 rounded-xl bg-background-panel-tertiary px-3 py-2 text-12-regular text-text-weak">{status()}</div>
 +            </Show>
 +            <div class="mt-4 flex flex-col gap-2">
-+              <Button disabled={busy()} onClick={() => void submitReplan()}>
++              <Button disabled={busy() || Boolean(pendingRevisionID())} onClick={() => void submitReplan()}>
 +                Propose Revised Plan
 +              </Button>
-+              <Button variant="secondary" disabled={busy()} onClick={() => void submitProceed()}>
++              <Button variant="secondary" disabled={busy() || Boolean(pendingRevisionID())} onClick={() => void submitProceed()}>
 +                Proceed
 +              </Button>
 +            </div>
