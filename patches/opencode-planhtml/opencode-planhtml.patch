@@ -973,11 +973,12 @@ index 4bb6efaf9..be15bdf93 100644
 
 diff --git a/packages/opencode/src/server/routes/session-plan.ts b/packages/opencode/src/server/routes/session-plan.ts
 new file mode 100644
-index 000000000..c83025e1b
+index 000000000..2d586b660
 --- /dev/null
 +++ b/packages/opencode/src/server/routes/session-plan.ts
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,160 @@
 +import fs from "node:fs/promises"
++import path from "node:path"
 +import { Hono } from "hono"
 +import { describeRoute, resolver, validator } from "hono-openapi"
 +import z from "zod"
@@ -1030,7 +1031,15 @@ index 000000000..c83025e1b
 +            try {
 +              const planMarkdown = await fs.readFile(Session.plan(session), "utf8")
 +              if (SessionPlanHtml.isPlanReadyForOpen(planMarkdown)) {
-+                return c.json({ error: "user_plan_missing" }, 409)
++                const markdown = SessionPlanUser.deriveUserPlanMarkdown(planMarkdown)
++                await fs.mkdir(path.dirname(sourcePath), { recursive: true })
++                await fs.writeFile(sourcePath, markdown, "utf8")
++                const document = SessionPlanUser.buildPlanUserDocument(markdown, sourcePath)
++                return c.json({
++                  document,
++                  markdown,
++                  sourcePath,
++                })
 +              }
 +            } catch (planError) {
 +              if ((planError as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw planError
@@ -1159,10 +1168,10 @@ index 5ed5acafa..5885faf4a 100644
 
 diff --git a/packages/opencode/src/session/plan-action.ts b/packages/opencode/src/session/plan-action.ts
 new file mode 100644
-index 000000000..b88331e1a
+index 000000000..fc7df6a6e
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-action.ts
-@@ -0,0 +1,337 @@
+@@ -0,0 +1,348 @@
 +import fs from "node:fs/promises"
 +import path from "node:path"
 +import { setTimeout as sleep } from "node:timers/promises"
@@ -1263,6 +1272,17 @@ index 000000000..b88331e1a
 +    }
 +  } catch (error) {
 +    if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw error
++  }
++
++  if (!user && SessionPlanHtml.isPlanReadyForOpen(markdown)) {
++    const userMarkdown = SessionPlanUser.deriveUserPlanMarkdown(markdown)
++    await fs.mkdir(path.dirname(userSourcePath), { recursive: true })
++    await fs.writeFile(userSourcePath, userMarkdown, "utf8")
++    user = {
++      sourcePath: userSourcePath,
++      markdown: userMarkdown,
++      document: SessionPlanUser.buildPlanUserDocument(userMarkdown, userSourcePath),
++    }
 +  }
 +
 +  SessionPlanHtml.assertReadyPlanHasUserFacingPlan({
@@ -1538,10 +1558,10 @@ index 000000000..4205fab6b
 
 diff --git a/packages/opencode/src/session/plan-html.ts b/packages/opencode/src/session/plan-html.ts
 new file mode 100644
-index 000000000..0e13cd95c
+index 000000000..86557efce
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-html.ts
-@@ -0,0 +1,701 @@
+@@ -0,0 +1,705 @@
 +import fs from "node:fs/promises"
 +import { createHash } from "node:crypto"
 +import { release } from "node:os"
@@ -2183,6 +2203,10 @@ index 000000000..0e13cd95c
 +    }
 +  }
 +
++  if (!userMarkdown && ready) {
++    userMarkdown = SessionPlanUser.deriveUserPlanMarkdown(input.markdown)
++  }
++
 +  if (userMarkdown && (input.persistMarkdown ?? true)) {
 +    await fs.mkdir(path.dirname(userMarkdownPath), { recursive: true })
 +    await fs.writeFile(userMarkdownPath, userMarkdown, "utf8")
@@ -2340,10 +2364,10 @@ index 000000000..11e915f7f
 
 diff --git a/packages/opencode/src/session/plan-user.ts b/packages/opencode/src/session/plan-user.ts
 new file mode 100644
-index 000000000..0e9616b41
+index 000000000..6ce4c8312
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-user.ts
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,409 @@
 +import { createHash } from "node:crypto"
 +import path from "node:path"
 +
@@ -2625,6 +2649,31 @@ index 000000000..0e9616b41
 +      throw new Error("User plan must be self-contained and must not refer to a previous plan")
 +    }
 +  }
++}
++
++export function deriveUserPlanMarkdown(markdown: string) {
++  let result = normalize(markdown)
++  if (!result) return result
++
++  result = result.replace(/^#\s+Plan Rationale\b/im, "# Piano Razionale")
++
++  if (!/^#\s+Goal\b/im.test(result)) {
++    result = `# Goal\n\nReview the current plan.\n\n${result}`
++  }
++
++  if (!/^#\s+Piano Razionale\b/im.test(result)) {
++    const rationale =
++      "# Piano Razionale\n\nThis review plan mirrors the current internal plan so it can be reviewed and commented on in one place."
++    const actions = result.match(/^#\s+Actions\b/im)
++
++    if (actions?.index !== undefined) {
++      result = `${result.slice(0, actions.index).trim()}\n\n${rationale}\n\n${result.slice(actions.index).trim()}`
++    } else {
++      result = `${result}\n\n${rationale}`
++    }
++  }
++
++  return result.trim()
 +}
 +
 +export function buildPlanUserDocument(markdown: string, sourcePath: string): PlanUserDocument {
@@ -3088,11 +3137,13 @@ index e91bc3faa..da893036a 100644
 
 diff --git a/packages/opencode/test/server/session-plan.test.ts b/packages/opencode/test/server/session-plan.test.ts
 new file mode 100644
-index 000000000..109d7b4f8
+index 000000000..d50fe1385
 --- /dev/null
 +++ b/packages/opencode/test/server/session-plan.test.ts
-@@ -0,0 +1,478 @@
+@@ -0,0 +1,484 @@
 +import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
++import fs from "node:fs/promises"
++import path from "node:path"
 +
 +import { Instance } from "../../src/project/instance"
 +import { Question } from "../../src/question"
@@ -3221,15 +3272,14 @@ index 000000000..109d7b4f8
 +    })
 +  })
 +
-+  test("returns a controlled error when a ready plan is missing the user-facing document", async () => {
++  test("returns a generated user-facing plan document when the internal plan is ready", async () => {
 +    await using tmp = await tmpdir({ git: true })
 +    await Instance.provide({
 +      directory: tmp.path,
 +      fn: async () => {
 +        const session = await Session.create({})
-+        await expect(SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })).rejects.toThrow(
-+          "user-facing plan",
-+        )
++        await fs.mkdir(path.dirname(Session.plan(session)), { recursive: true })
++        await fs.writeFile(Session.plan(session), SAMPLE_PLAN, "utf8")
 +        const app = Server.Default()
 +
 +        const res = await app.request(`/session/${session.id}/plan/user`, {
@@ -3239,12 +3289,14 @@ index 000000000..109d7b4f8
 +          },
 +        })
 +
-+        expect(res.status).toBe(409)
++        expect(res.status).toBe(200)
 +        expect(await res.json()).toEqual(
 +          expect.objectContaining({
-+            error: "user_plan_missing",
++            markdown: expect.stringContaining("# Piano Razionale"),
++            sourcePath: Session.planUser(session),
 +          }),
 +        )
++        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain("# Piano Razionale")
 +
 +        await Session.remove(session.id)
 +      },
@@ -3368,16 +3420,14 @@ index 000000000..109d7b4f8
 +    })
 +  })
 +
-+  test("rejects replan when a ready plan is missing the user-facing document", async () => {
++  test("regenerates the user-facing plan before replan when it is missing", async () => {
 +    await using tmp = await tmpdir({ git: true })
 +    await Instance.provide({
 +      directory: tmp.path,
 +      fn: async () => {
 +        const session = await Session.create({})
-+        await expect(SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })).rejects.toThrow(
-+          "user-facing plan",
-+        )
-+        const document = SessionPlanHtml.buildPlanDocument(SAMPLE_PLAN, Session.plan(session))
++        const artifacts = await SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })
++        await fs.rm(Session.planUser(session), { force: true })
 +        const app = Server.Default()
 +
 +        const res = await app.request(`/session/${session.id}/plan/replan`, {
@@ -3387,7 +3437,7 @@ index 000000000..109d7b4f8
 +            "x-opencode-directory": tmp.path,
 +          },
 +          body: JSON.stringify({
-+            planRevisionID: document.planRevisionID,
++            planRevisionID: artifacts.hash,
 +            comments: [
 +              {
 +                sectionID: "step-1-analyze-the-current-plan-output",
@@ -3398,12 +3448,8 @@ index 000000000..109d7b4f8
 +          }),
 +        })
 +
-+        expect(res.status).toBe(409)
-+        expect(await res.json()).toEqual(
-+          expect.objectContaining({
-+            error: "user_plan_missing",
-+          }),
-+        )
++        expect(res.status).toBe(200)
++        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain("# Piano Razionale")
 +
 +        await Session.remove(session.id)
 +      },
@@ -3501,16 +3547,28 @@ index 000000000..109d7b4f8
 +    })
 +  })
 +
-+  test("rejects proceed when a ready plan is missing the user-facing document", async () => {
++  test("regenerates the user-facing plan before proceed when it is missing", async () => {
 +    await using tmp = await tmpdir({ git: true })
 +    await Instance.provide({
 +      directory: tmp.path,
 +      fn: async () => {
 +        const session = await Session.create({})
-+        await expect(SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })).rejects.toThrow(
-+          "user-facing plan",
-+        )
-+        const document = SessionPlanHtml.buildPlanDocument(SAMPLE_PLAN, Session.plan(session))
++        const artifacts = await SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })
++        await fs.rm(Session.planUser(session), { force: true })
++        const askPromise = Question.ask({
++          sessionID: session.id,
++          questions: [
++            {
++              question: "Plan complete?",
++              header: "Build Agent",
++              custom: false,
++              options: [
++                { label: "Yes", description: "Proceed to build" },
++                { label: "No", description: "Keep refining" },
++              ],
++            },
++          ],
++        })
 +        const app = Server.Default()
 +
 +        const res = await app.request(`/session/${session.id}/plan/proceed`, {
@@ -3520,16 +3578,13 @@ index 000000000..109d7b4f8
 +            "x-opencode-directory": tmp.path,
 +          },
 +          body: JSON.stringify({
-+            planRevisionID: document.planRevisionID,
++            planRevisionID: artifacts.hash,
 +          }),
 +        })
 +
-+        expect(res.status).toBe(409)
-+        expect(await res.json()).toEqual(
-+          expect.objectContaining({
-+            error: "user_plan_missing",
-+          }),
-+        )
++        expect(res.status).toBe(200)
++        await expect(askPromise).resolves.toEqual([["Yes"]])
++        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain("# Piano Razionale")
 +
 +        await Session.remove(session.id)
 +      },
@@ -3573,10 +3628,10 @@ index 000000000..109d7b4f8
 
 diff --git a/packages/opencode/test/session/plan-html.test.ts b/packages/opencode/test/session/plan-html.test.ts
 new file mode 100644
-index 000000000..42380627f
+index 000000000..6231c05a8
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-html.test.ts
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,257 @@
 +import { afterEach, describe, expect, spyOn, test } from "bun:test"
 +import fs from "node:fs/promises"
 +import path from "node:path"
@@ -3763,7 +3818,7 @@ index 000000000..42380627f
 +    })
 +  })
 +
-+  test("rejects ready plans when the user-facing plan is missing", async () => {
++  test("creates a user-facing plan automatically for ready plans", async () => {
 +    await using tmp = await tmpdir({ git: true })
 +
 +    await Instance.provide({
@@ -3771,15 +3826,16 @@ index 000000000..42380627f
 +      fn: async () => {
 +        const session = await Session.create({})
 +
-+        await expect(
-+          SessionPlanHtml.renderPlanArtifacts({
-+            session,
-+            markdown: SAMPLE_PLAN,
-+            autoOpen: false,
-+          }),
-+        ).rejects.toThrow("user-facing plan")
++        const artifacts = await SessionPlanHtml.renderPlanArtifacts({
++          session,
++          markdown: SAMPLE_PLAN,
++          autoOpen: false,
++        })
 +
 +        expect(await fs.readFile(Session.plan(session), "utf8")).toBe(SAMPLE_PLAN)
++        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain("# Piano Razionale")
++        expect(artifacts.htmlPath).toBe(Session.planUserHtml(session))
++        expect(artifacts.liveUrl).toBeTruthy()
 +
 +        await Session.remove(session.id)
 +      },
@@ -3836,10 +3892,10 @@ index 000000000..42380627f
 
 diff --git a/packages/opencode/test/session/plan-user.test.ts b/packages/opencode/test/session/plan-user.test.ts
 new file mode 100644
-index 000000000..b9a8f13b1
+index 000000000..e444c2a8f
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-user.test.ts
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,84 @@
 +import { describe, expect, test } from "bun:test"
 +
 +import { Instance } from "../../src/project/instance"
@@ -3898,6 +3954,15 @@ index 000000000..b9a8f13b1
 +    expect(() =>
 +      SessionPlanUser.assertSelfContainedPlan(`# Goal\nSame as the previous plan, with one extra note.`),
 +    ).toThrow(/self-contained/i)
++  })
++
++  test("derives a valid user-facing plan from the internal plan markdown", () => {
++    const derived = SessionPlanUser.deriveUserPlanMarkdown(`# Goal\n\nShip the fix.\n\n# Plan Rationale\n\nKeep the change small.\n\n# Actions\n\n## Step 1\nDo it.`)
++
++    expect(derived).toContain("# Goal")
++    expect(derived).toContain("# Piano Razionale")
++    expect(derived).not.toContain("# Plan Rationale")
++    expect(() => SessionPlanUser.buildPlanUserDocument(derived, ".opencode/plans/example.user.md")).not.toThrow()
 +  })
 +
 +  test("stores user-plan artifacts next to the internal plan", async () => {
