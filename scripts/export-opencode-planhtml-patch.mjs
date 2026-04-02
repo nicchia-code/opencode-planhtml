@@ -18,6 +18,12 @@ const PATCH_FILE = path.join(PATCH_DIR, "opencode-planhtml.patch")
 const MANIFEST_FILE = path.join(PATCH_DIR, "manifest.json")
 
 const PATCHED_FILES = [
+  "packages/app/src/app.tsx",
+  "packages/app/src/context/plan-comments.test.ts",
+  "packages/app/src/context/plan-comments.ts",
+  "packages/app/src/pages/session-plan-types.ts",
+  "packages/app/src/pages/session-plan.test.tsx",
+  "packages/app/src/pages/session-plan.tsx",
   "packages/opencode/package.json",
   "packages/opencode/src/agent/agent.ts",
   "packages/opencode/src/cli/cmd/tui/worker.ts",
@@ -29,13 +35,16 @@ const PATCHED_FILES = [
   "packages/opencode/src/session/plan-control.ts",
   "packages/opencode/src/session/plan-html.ts",
   "packages/opencode/src/session/plan-server.ts",
+  "packages/opencode/src/session/plan-user.ts",
   "packages/opencode/src/session/processor.ts",
   "packages/opencode/src/session/prompt.ts",
   "packages/opencode/src/session/prompt/build-switch.txt",
   "packages/opencode/src/session/prompt/plan.txt",
+  "packages/opencode/src/session/prompt/plan-user.txt",
   "packages/opencode/src/tool/plan.ts",
   "packages/opencode/test/server/session-plan.test.ts",
   "packages/opencode/test/session/plan-html.test.ts",
+  "packages/opencode/test/session/plan-user.test.ts",
 ]
 
 function usage() {
