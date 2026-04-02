@@ -637,10 +637,10 @@ index 000000000..19c96ad0f
 
 diff --git a/packages/app/src/pages/session-plan.test.tsx b/packages/app/src/pages/session-plan.test.tsx
 new file mode 100644
-index 000000000..45993b4dc
+index 000000000..9a1112e41
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.test.tsx
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,216 @@
 +import { beforeAll, describe, expect, mock, test } from "bun:test"
 +import fs from "node:fs"
 +
@@ -830,6 +830,24 @@ index 000000000..45993b4dc
 +    expect(source).toContain('closest<HTMLElement>("[data-plan-node-text][data-plan-node-id]")')
 +  })
 +
++  test("groups What/Why/Files rows into a review table and renders actual list bullets", () => {
++    const source = fs.readFileSync(new URL("./session-plan.tsx", import.meta.url), "utf8")
++
++    expect(source).toContain("function FieldTable")
++    expect(source).toContain("parseReviewField(node.text)")
++    expect(source).toContain('"Files / Tests"')
++    expect(source).toContain('list-outside list-disc')
++    expect(source).toContain('list-outside list-decimal')
++  })
++
++  test("renders inline bold markdown as strong text in the review page", () => {
++    const source = fs.readFileSync(new URL("./session-plan.tsx", import.meta.url), "utf8")
++
++    expect(source).toContain('kind === "strong"')
++    expect(source).toContain('<strong class="font-semibold text-[#2f3437]">')
++    expect(source).toContain('parseInlinePieces')
++  })
++
 +  test("forces the standalone review page background onto html and body to avoid dark overscroll", () => {
 +    const source = fs.readFileSync(new URL("./session-plan.tsx", import.meta.url), "utf8")
 +
@@ -842,10 +860,10 @@ index 000000000..45993b4dc
 
 diff --git a/packages/app/src/pages/session-plan.tsx b/packages/app/src/pages/session-plan.tsx
 new file mode 100644
-index 000000000..cfcbe4b7a
+index 000000000..6267a0e0f
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.tsx
-@@ -0,0 +1,621 @@
+@@ -0,0 +1,794 @@
 +import { Button } from "@opencode-ai/ui/button"
 +import { showToast } from "@opencode-ai/ui/toast"
 +import { useSearchParams, useParams } from "@solidjs/router"
@@ -872,6 +890,13 @@ index 000000000..cfcbe4b7a
 +}
 +
 +type TextRangeAnchor = Extract<PlanCommentAnchor, { kind: "text-range" }>
++type ReviewFieldLabel = "what" | "why" | "files/tests"
++type InlinePieceKind = "text" | "strong" | "code"
++
++type InlinePiece = {
++  kind: InlinePieceKind
++  text: string
++}
 +
 +const REVIEW_BACKGROUND = "#fbfbfa"
 +
@@ -923,18 +948,7 @@ index 000000000..cfcbe4b7a
 +}
 +
 +export function highlightText(text: string, comments: PlanComment[]) {
-+  const highlights = comments
-+    .map((comment) => {
-+      if (comment.anchor.kind !== "text-range" || !comment.anchor.quote) return null
-+      const match = resolveTextRange(text, comment.anchor)
-+      if (!match) return null
-+      return {
-+        start: match.start,
-+        end: match.end,
-+      }
-+    })
-+    .filter((item): item is { start: number; end: number } => Boolean(item))
-+    .sort((a, b) => a.start - b.start)
++  const highlights = getHighlightRanges(text, comments)
 +
 +  if (!highlights.length) return [{ type: "text" as const, value: text }]
 +  const parts: Array<{ type: "text" | "mark"; value: string }> = []
@@ -953,16 +967,158 @@ index 000000000..cfcbe4b7a
 +  return parts
 +}
 +
++function getHighlightRanges(text: string, comments: PlanComment[]) {
++  return comments
++    .map((comment) => {
++      if (comment.anchor.kind !== "text-range" || !comment.anchor.quote) return null
++      const match = resolveTextRange(text, comment.anchor)
++      if (!match) return null
++      return {
++        start: match.start,
++        end: match.end,
++      }
++    })
++    .filter((item): item is { start: number; end: number } => Boolean(item))
++    .sort((a, b) => a.start - b.start)
++}
++
++function parseInlinePieces(text: string) {
++  const pieces: InlinePiece[] = []
++  const pattern = /(\*\*([^*]+)\*\*)|`([^`]+)`/g
++  let lastIndex = 0
++  let match: RegExpExecArray | null
++
++  while ((match = pattern.exec(text))) {
++    if (match.index > lastIndex) {
++      pieces.push({ kind: "text", text: text.slice(lastIndex, match.index) })
++    }
++
++    if (match[2]) {
++      pieces.push({ kind: "strong", text: match[2] })
++    } else if (match[3]) {
++      pieces.push({ kind: "code", text: match[3] })
++    }
++
++    lastIndex = match.index + match[0].length
++  }
++
++  if (lastIndex < text.length) {
++    pieces.push({ kind: "text", text: text.slice(lastIndex) })
++  }
++
++  return pieces.length ? pieces : [{ kind: "text", text }]
++}
++
++function visibleInlineText(text: string) {
++  return parseInlinePieces(text)
++    .map((piece) => piece.text)
++    .join("")
++}
++
++function renderInlinePiece(kind: InlinePieceKind, text: string) {
++  if (kind === "strong") return <strong class="font-semibold text-[#2f3437]">{text}</strong>
++  if (kind === "code") return <code class="rounded bg-[rgba(55,53,47,0.08)] px-1 py-0.5 text-[0.95em] text-[#1f2937]">{text}</code>
++  return text
++}
++
 +function TextWithHighlights(props: { text: string; comments: PlanComment[] }) {
++  const pieces = createMemo(() => parseInlinePieces(props.text))
++  const highlights = createMemo(() => getHighlightRanges(visibleInlineText(props.text), props.comments))
 +  return (
 +    <>
-+      <For each={highlightText(props.text, props.comments)}>
-+        {(part) =>
-+          part.type === "mark" ? <mark class="rounded-[4px] bg-[#fff1c2] px-0.5 text-current shadow-[inset_0_-1px_0_rgba(202,138,4,0.12)]">{part.value}</mark> : part.value
-+        }
++      <For each={splitInlinePiecesByHighlights(pieces(), highlights())}>
++        {(part) => {
++          const content = renderInlinePiece(part.kind, part.text)
++          return part.highlight ? <mark class="rounded-[4px] bg-[#fff1c2] px-0.5 text-current shadow-[inset_0_-1px_0_rgba(202,138,4,0.12)]">{content}</mark> : content
++        }}
 +      </For>
 +    </>
 +  )
++}
++
++function splitInlinePiecesByHighlights(pieces: InlinePiece[], highlights: Array<{ start: number; end: number }>) {
++  const out: Array<InlinePiece & { highlight: boolean }> = []
++  let offset = 0
++
++  for (const piece of pieces) {
++    let cursor = 0
++    const pieceStart = offset
++    const pieceEnd = offset + piece.text.length
++
++    for (const highlight of highlights) {
++      if (highlight.end <= pieceStart || highlight.start >= pieceEnd) continue
++      const localStart = Math.max(0, highlight.start - pieceStart)
++      const localEnd = Math.min(piece.text.length, highlight.end - pieceStart)
++      if (localStart > cursor) {
++        out.push({ ...piece, text: piece.text.slice(cursor, localStart), highlight: false })
++      }
++      if (localEnd > localStart) {
++        out.push({ ...piece, text: piece.text.slice(localStart, localEnd), highlight: true })
++      }
++      cursor = Math.max(cursor, localEnd)
++    }
++
++    if (cursor < piece.text.length) {
++      out.push({ ...piece, text: piece.text.slice(cursor), highlight: false })
++    }
++
++    offset += piece.text.length
++  }
++
++  return out.filter((piece) => piece.text.length > 0)
++}
++
++function parseReviewField(text: string) {
++  const match = text.match(/^(What|Why|Files\/Tests|Files|Tests):\s*(.+)$/i)
++  if (!match) return null
++  const rawLabel = match[1].toLowerCase()
++  const label: ReviewFieldLabel = rawLabel === "files" || rawLabel === "tests" ? "files/tests" : (rawLabel as ReviewFieldLabel)
++  return {
++    label,
++    value: match[2].trim(),
++  }
++}
++
++function isHiddenReviewNode(node: PlanUserNode) {
++  if (node.kind === "heading") {
++    return ["actions", "internal plan"].includes(node.text.trim().toLowerCase())
++  }
++  if (node.kind === "paragraph") {
++    return ["internal plan", "actions"].includes(visibleInlineText(node.text).trim().toLowerCase())
++  }
++  return false
++}
++
++function groupReviewNodes(nodes: PlanUserNode[]) {
++  const groups: Array<{ kind: "node"; node: PlanUserNode } | { kind: "fields"; nodes: PlanUserParagraphNode[] }> = []
++  let index = 0
++
++  while (index < nodes.length) {
++    const node = nodes[index]
++    if (!node || isHiddenReviewNode(node)) {
++      index += 1
++      continue
++    }
++
++    if (node.kind === "paragraph" && parseReviewField(node.text)) {
++      const fieldNodes: PlanUserParagraphNode[] = []
++      let cursor = index
++      while (cursor < nodes.length) {
++        const candidate = nodes[cursor]
++        if (!candidate || candidate.kind !== "paragraph" || !parseReviewField(candidate.text)) break
++        fieldNodes.push(candidate)
++        cursor += 1
++      }
++      groups.push({ kind: "fields", nodes: fieldNodes })
++      index = cursor
++      continue
++    }
++
++    groups.push({ kind: "node", node })
++    index += 1
++  }
++
++  return groups
 +}
 +
 +function NodeFrame(props: { nodeID: string; comments: Accessor<PlanComment[]>; onCommentNode?: (nodeID: string) => void; children: JSX.Element }) {
@@ -1006,13 +1162,13 @@ index 000000000..cfcbe4b7a
 +function HeadingNode(props: { node: PlanUserHeadingNode; comments: Accessor<PlanComment[]>; onCommentNode?: (nodeID: string) => void }) {
 +  const nodeComments = createMemo(() => props.comments().filter((comment) => comment.anchor.nodeID === props.node.id))
 +  const classes = {
-+    1: "text-24-semibold",
-+    2: "text-18-semibold",
-+    3: "text-16-semibold",
++    1: "text-[28px] font-semibold leading-[1.2]",
++    2: "text-[22px] font-semibold leading-[1.3]",
++    3: "text-[18px] font-semibold leading-[1.4]",
 +  } as Record<number, string>
 +  return (
 +    <NodeFrame nodeID={props.node.id} comments={props.comments} onCommentNode={props.onCommentNode}>
-+      <div class={`${classes[props.node.level] ?? "text-15-semibold"} text-[#2f3437] tracking-[-0.02em]`}>
++      <div class={`${classes[props.node.level] ?? "text-[17px] font-semibold"} text-[#2f3437] tracking-[-0.02em]`}>
 +        <span data-plan-node-id={props.node.id} data-plan-node-text="true" class="select-text">
 +          <TextWithHighlights text={props.node.text} comments={nodeComments()} />
 +        </span>
@@ -1039,10 +1195,40 @@ index 000000000..cfcbe4b7a
 +
 +  return (
 +    <NodeFrame nodeID={props.node.id} comments={props.comments} onCommentNode={props.onCommentNode}>
-+      <Show when={props.node.ordered} fallback={<ul class="pl-6 space-y-2 text-[15px] leading-7 text-[#37352f] marker:text-[#2f76d2]">{listContent()}</ul>}>
-+        <ol class="pl-6 space-y-2 text-[15px] leading-7 text-[#37352f] marker:text-[#2f76d2]">{listContent()}</ol>
++      <Show when={props.node.ordered} fallback={<ul class="list-outside list-disc pl-6 space-y-2 text-[15px] leading-7 text-[#37352f] marker:text-[#2f76d2]">{listContent()}</ul>}>
++        <ol class="list-outside list-decimal pl-6 space-y-2 text-[15px] leading-7 text-[#37352f] marker:text-[#2f76d2]">{listContent()}</ol>
 +      </Show>
 +    </NodeFrame>
++  )
++}
++
++function FieldTable(props: { nodes: PlanUserParagraphNode[]; comments: Accessor<PlanComment[]> }) {
++  return (
++    <div class="overflow-hidden rounded-2xl border border-[rgba(55,53,47,0.08)] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
++      <table class="w-full border-collapse text-left">
++        <tbody>
++          <For each={props.nodes}>
++            {(node, index) => {
++              const field = parseReviewField(node.text)!
++              const nodeComments = createMemo(() => props.comments().filter((comment) => comment.anchor.nodeID === node.id))
++              const label = field.label === "files/tests" ? "Files / Tests" : field.label[0].toUpperCase() + field.label.slice(1)
++              return (
++                <tr classList={{ "border-t border-[rgba(55,53,47,0.08)]": index() > 0 }}>
++                  <th class="w-[170px] align-top bg-[rgba(55,53,47,0.03)] px-4 py-3 text-[12px] font-semibold uppercase tracking-[0.08em] text-[#787774]">
++                    {label}
++                  </th>
++                  <td class="px-4 py-3 text-[15px] leading-7 text-[#37352f]">
++                    <span data-plan-node-id={node.id} data-plan-node-text="true" class="select-text">
++                      <TextWithHighlights text={field.value} comments={nodeComments()} />
++                    </span>
++                  </td>
++                </tr>
++              )
++            }}
++          </For>
++        </tbody>
++      </table>
++    </div>
 +  )
 +}
 +
@@ -1111,9 +1297,14 @@ index 000000000..cfcbe4b7a
 +}
 +
 +export function PlanDocumentView(props: PlanDocumentViewProps) {
++  const groups = createMemo(() => groupReviewNodes(props.document.nodes))
 +  return (
 +    <div class="space-y-4">
-+      <For each={props.document.nodes}>{(node) => <PlanNodeView node={node} comments={props.comments} onCommentNode={props.onCommentNode} />}</For>
++      <For each={groups()}>
++        {(group) =>
++          group.kind === "fields" ? <FieldTable nodes={group.nodes} comments={props.comments} /> : <PlanNodeView node={group.node} comments={props.comments} onCommentNode={props.onCommentNode} />
++        }
++      </For>
 +    </div>
 +  )
 +}
@@ -3039,10 +3230,10 @@ index 000000000..82e97392d
 
 diff --git a/packages/opencode/src/session/plan-user.ts b/packages/opencode/src/session/plan-user.ts
 new file mode 100644
-index 000000000..6ce4c8312
+index 000000000..b71582fd5
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-user.ts
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,432 @@
 +import { createHash } from "node:crypto"
 +import path from "node:path"
 +
@@ -3121,6 +3312,11 @@ index 000000000..6ce4c8312
 +  /\bas\s+above\b/i,
 +]
 +
++const HIDDEN_STANDALONE_LINES = [
++  /^(?:\*\*)?internal plan(?:\*\*)?$/i,
++  /^(?:\*\*)?actions(?:\*\*)?$/i,
++]
++
 +function escapeHtml(value: string): string {
 +  return value
 +    .replace(/&/g, "&amp;")
@@ -3133,6 +3329,7 @@ index 000000000..6ce4c8312
 +function renderInline(value: string): string {
 +  return escapeHtml(value)
 +    .replace(/`([^`]+)`/g, "<code>$1</code>")
++    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
 +    .replace(/\[(.*?)\]\((.*?)\)/g, (_match, text, href) => `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`)
 +}
 +
@@ -3153,6 +3350,22 @@ index 000000000..6ce4c8312
 +
 +function normalize(markdown: string) {
 +  return markdown.trim()
++}
++
++export function sanitizeUserPlanMarkdown(markdown: string) {
++  return normalize(markdown)
++    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "")
++    .split(/\r?\n/)
++    .filter((line) => {
++      const trimmed = line.trim()
++      if (!trimmed) return true
++      if (/^#{1,6}\s+actions\s*$/i.test(trimmed)) return false
++      if (/^#{1,6}\s+internal plan\s*$/i.test(trimmed)) return false
++      return !HIDDEN_STANDALONE_LINES.some((pattern) => pattern.test(trimmed))
++    })
++    .join("\n")
++    .replace(/\n{3,}/g, "\n\n")
++    .trim()
 +}
 +
 +function hash(markdown: string) {
@@ -3327,7 +3540,7 @@ index 000000000..6ce4c8312
 +}
 +
 +export function deriveUserPlanMarkdown(markdown: string) {
-+  let result = normalize(markdown)
++  let result = sanitizeUserPlanMarkdown(markdown)
 +  if (!result) return result
 +
 +  result = result.replace(/^#\s+Plan Rationale\b/im, "# Piano Razionale")
@@ -3348,12 +3561,13 @@ index 000000000..6ce4c8312
 +    }
 +  }
 +
-+  return result.trim()
++  return sanitizeUserPlanMarkdown(result)
 +}
 +
 +export function buildPlanUserDocument(markdown: string, sourcePath: string): PlanUserDocument {
-+  assertSelfContainedPlan(markdown)
-+  const nodes = parseNodes(markdown)
++  const sanitized = sanitizeUserPlanMarkdown(markdown)
++  assertSelfContainedPlan(sanitized)
++  const nodes = parseNodes(sanitized)
 +  const sections = gatherSections(nodes)
 +  const sectionTitles = new Set(sections.map((section) => section.title.toLowerCase()))
 +  if (!sectionTitles.has("goal") || !sectionTitles.has("piano razionale")) {
@@ -3364,7 +3578,7 @@ index 000000000..6ce4c8312
 +    title: resolveTitle(nodes, sourcePath),
 +    sourcePath,
 +    generatedAt: new Date().toLocaleString(),
-+    planRevisionID: hash(markdown),
++    planRevisionID: hash(sanitized),
 +    sections,
 +    nodes,
 +  }
@@ -4745,10 +4959,10 @@ index 000000000..784aaf3ab
 
 diff --git a/packages/opencode/test/session/plan-user.test.ts b/packages/opencode/test/session/plan-user.test.ts
 new file mode 100644
-index 000000000..e444c2a8f
+index 000000000..5e64124d4
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-user.test.ts
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,103 @@
 +import { describe, expect, test } from "bun:test"
 +
 +import { Instance } from "../../src/project/instance"
@@ -4815,7 +5029,26 @@ index 000000000..e444c2a8f
 +    expect(derived).toContain("# Goal")
 +    expect(derived).toContain("# Piano Razionale")
 +    expect(derived).not.toContain("# Plan Rationale")
++    expect(derived).not.toContain("# Actions")
 +    expect(() => SessionPlanUser.buildPlanUserDocument(derived, ".opencode/plans/example.user.md")).not.toThrow()
++  })
++
++  test("sanitizes hidden operational sections from the user-facing plan", () => {
++    const sanitized = SessionPlanUser.sanitizeUserPlanMarkdown(`# Goal\n\nVisible.\n\n**Internal Plan**\n\n<system-reminder>hidden</system-reminder>\n\n# Actions\n\n## Step 1\nWhat: Visible row`)
++
++    expect(sanitized).toContain("# Goal")
++    expect(sanitized).toContain("## Step 1")
++    expect(sanitized).not.toContain("Internal Plan")
++    expect(sanitized).not.toContain("system-reminder")
++    expect(sanitized).not.toContain("# Actions")
++  })
++
++  test("renders markdown bold in the fallback html snapshot", () => {
++    const document = SessionPlanUser.buildPlanUserDocument(`# Goal\n\nShip **this exact fix**.\n\n# Piano Razionale\n\nKeep **Files/Tests** readable.`, ".opencode/plans/example.user.md")
++    const html = SessionPlanUser.renderPlanUserHtml(document)
++
++    expect(html).toContain("<strong>this exact fix</strong>")
++    expect(html).toContain("<strong>Files/Tests</strong>")
 +  })
 +
 +  test("stores user-plan artifacts next to the internal plan", async () => {
