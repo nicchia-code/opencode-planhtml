@@ -294,10 +294,10 @@ index 000000000..19c96ad0f
 
 diff --git a/packages/app/src/pages/session-plan.test.tsx b/packages/app/src/pages/session-plan.test.tsx
 new file mode 100644
-index 000000000..0f0bb897d
+index 000000000..046b5cb51
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.test.tsx
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,189 @@
 +import { beforeAll, describe, expect, mock, test } from "bun:test"
 +import fs from "node:fs"
 +
@@ -391,9 +391,34 @@ index 000000000..0f0bb897d
 +    ])
 +  })
 +
++  test("uses saved offsets and context to highlight the intended repeated quote", () => {
++    const parts = highlightText("Repeat this, then repeat this again.", [
++      {
++        id: "comment-2",
++        time: 2,
++        comment: "Only the second phrase",
++        anchor: {
++          kind: "text-range",
++          nodeID: "node-repeat",
++          quote: "repeat this",
++          start: 18,
++          end: 29,
++          prefix: "then ",
++          suffix: " again.",
++        },
++      },
++    ])
++
++    expect(parts).toEqual([
++      { type: "text", value: "Repeat this, then " },
++      { type: "mark", value: "repeat this" },
++      { type: "text", value: " again." },
++    ])
++  })
++
 +  test("creates a text-range anchor from a DOM selection inside a commentable node", () => {
-+    document.body.innerHTML = `<div data-plan-node-id="node-paragraph">The user can inspect the plan, leave comments, and approve it.</div>`
-+    const node = document.querySelector("[data-plan-node-id='node-paragraph']")!
++    document.body.innerHTML = `<div data-plan-node-id="node-paragraph"><span data-plan-node-id="node-paragraph" data-plan-node-text="true">The user can inspect the plan, leave comments, and approve it.</span></div>`
++    const node = document.querySelector("[data-plan-node-text='true']")!
 +    const text = node.firstChild!
 +    const range = document.createRange()
 +    const start = text.textContent!.indexOf("leave comments")
@@ -409,6 +434,8 @@ index 000000000..0f0bb897d
 +        kind: "text-range",
 +        nodeID: "node-paragraph",
 +        quote: "leave comments",
++        start,
++        end: start + "leave comments".length,
 +      }),
 +    )
 +  })
@@ -452,14 +479,21 @@ index 000000000..0f0bb897d
 +    expect(source).toContain("setPendingRevisionID(document.planRevisionID)")
 +    expect(source).toContain("window.scrollTo({ top: 0, behavior: \"smooth\" })")
 +  })
++
++  test("tracks selectable text containers instead of whole block wrappers", () => {
++    const source = fs.readFileSync(new URL("./session-plan.tsx", import.meta.url), "utf8")
++
++    expect(source).toContain('data-plan-node-text="true"')
++    expect(source).toContain('closest<HTMLElement>("[data-plan-node-text][data-plan-node-id]")')
++  })
 +})
 
 diff --git a/packages/app/src/pages/session-plan.tsx b/packages/app/src/pages/session-plan.tsx
 new file mode 100644
-index 000000000..a16404268
+index 000000000..5eda78969
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.tsx
-@@ -0,0 +1,504 @@
+@@ -0,0 +1,600 @@
 +import { Button } from "@opencode-ai/ui/button"
 +import { showToast } from "@opencode-ai/ui/toast"
 +import { useSearchParams, useParams } from "@solidjs/router"
@@ -485,6 +519,49 @@ index 000000000..a16404268
 +  sourcePath: string
 +}
 +
++type TextRangeAnchor = Extract<PlanCommentAnchor, { kind: "text-range" }>
++
++const REVIEW_THEME_STYLE: JSX.CSSProperties = {
++  "color-scheme": "light",
++  "font-family": 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
++  "--background-base": "#fbfbfa",
++  "--background-weak": "#f7f6f3",
++  "--background-strong": "#ffffff",
++  "--background-stronger": "#ffffff",
++  "--surface-base": "rgba(55, 53, 47, 0.04)",
++  "--surface-base-hover": "rgba(55, 53, 47, 0.08)",
++  "--surface-base-active": "rgba(55, 53, 47, 0.12)",
++  "--surface-raised-base": "rgba(255, 255, 255, 0.92)",
++  "--surface-raised-strong": "#ffffff",
++  "--surface-raised-stronger": "#ffffff",
++  "--surface-strong": "#ffffff",
++  "--input-base": "#ffffff",
++  "--input-hover": "#fffdfb",
++  "--input-active": "#ffffff",
++  "--input-focus": "#ffffff",
++  "--text-base": "#4b4b47",
++  "--text-weak": "#787774",
++  "--text-weaker": "#9b9a97",
++  "--text-strong": "#2f3437",
++  "--text-interactive-base": "#2f76d2",
++  "--button-primary-base": "#2f3437",
++  "--button-secondary-base": "#ffffff",
++  "--button-secondary-hover": "#f7f6f3",
++  "--button-ghost-hover": "rgba(55, 53, 47, 0.05)",
++  "--button-ghost-hover2": "rgba(55, 53, 47, 0.08)",
++  "--border-base": "rgba(55, 53, 47, 0.16)",
++  "--border-weak-base": "rgba(55, 53, 47, 0.09)",
++  "--border-weaker-base": "rgba(55, 53, 47, 0.06)",
++  "--border-strong-base": "rgba(55, 53, 47, 0.22)",
++  "--border-selected": "rgba(47, 118, 210, 0.45)",
++  "--border-strong-selected": "rgba(47, 118, 210, 0.18)",
++  "--icon-base": "#8f8b86",
++  "--icon-hover": "#5f5c58",
++  "--icon-active": "#2f3437",
++  "--icon-selected": "#2f3437",
++  "--icon-invert-base": "#ffffff",
++}
++
 +type PlanDocumentViewProps = {
 +  document: PlanUserDocument
 +  comments: Accessor<PlanComment[]>
@@ -495,11 +572,11 @@ index 000000000..a16404268
 +  const highlights = comments
 +    .map((comment) => {
 +      if (comment.anchor.kind !== "text-range" || !comment.anchor.quote) return null
-+      const start = text.indexOf(comment.anchor.quote)
-+      if (start < 0) return null
++      const match = resolveTextRange(text, comment.anchor)
++      if (!match) return null
 +      return {
-+        start,
-+        end: start + comment.anchor.quote.length,
++        start: match.start,
++        end: match.end,
 +      }
 +    })
 +    .filter((item): item is { start: number; end: number } => Boolean(item))
@@ -527,7 +604,7 @@ index 000000000..a16404268
 +    <>
 +      <For each={highlightText(props.text, props.comments)}>
 +        {(part) =>
-+          part.type === "mark" ? <mark class="bg-yellow-200/80 dark:bg-yellow-500/30 rounded px-0.5">{part.value}</mark> : part.value
++          part.type === "mark" ? <mark class="rounded-[4px] bg-[#fff1c2] px-0.5 text-current shadow-[inset_0_-1px_0_rgba(202,138,4,0.12)]">{part.value}</mark> : part.value
 +        }
 +      </For>
 +    </>
@@ -536,21 +613,22 @@ index 000000000..a16404268
 +
 +function NodeFrame(props: { nodeID: string; comments: Accessor<PlanComment[]>; onCommentNode?: (nodeID: string) => void; children: JSX.Element }) {
 +  const nodeComments = createMemo(() => props.comments().filter((comment) => comment.anchor.nodeID === props.nodeID))
++  const blockComments = createMemo(() => nodeComments().filter((comment) => comment.anchor.kind === "node"))
 +  return (
 +    <div
 +      data-plan-node-id={props.nodeID}
-+      class="group relative rounded-xl border border-border-base bg-background-panel px-4 py-3"
++      class="group relative -mx-3 rounded-xl px-3 py-2 transition-colors duration-150 hover:bg-[rgba(55,53,47,0.03)]"
 +      classList={{
-+        "ring-1 ring-yellow-300/70 dark:ring-yellow-500/40": nodeComments().length > 0,
++        "border-l-2 border-[rgba(47,118,210,0.35)] bg-[rgba(47,118,210,0.08)] pl-[calc(0.75rem-2px)]": blockComments().length > 0,
 +      }}
 +    >
 +      <Show when={props.onCommentNode}>
 +        <button
 +          type="button"
-+          class="absolute right-3 top-3 hidden rounded-md border border-border-base bg-background-panel px-2 py-1 text-11-medium text-text-weak group-hover:block"
++          class="absolute right-3 top-3 hidden rounded-md border border-[rgba(55,53,47,0.08)] bg-white px-2 py-1 text-[11px] font-medium text-[#6f6e69] shadow-[0_1px_2px_rgba(15,23,42,0.04)] group-hover:block"
 +          onClick={() => props.onCommentNode?.(props.nodeID)}
 +        >
-+          Comment
++          Comment block
 +        </button>
 +      </Show>
 +      {props.children}
@@ -562,8 +640,10 @@ index 000000000..a16404268
 +  const nodeComments = createMemo(() => props.comments().filter((comment) => comment.anchor.nodeID === props.node.id))
 +  return (
 +    <NodeFrame nodeID={props.node.id} comments={props.comments} onCommentNode={props.onCommentNode}>
-+      <p class="text-15-regular leading-7 text-text-strong">
-+        <TextWithHighlights text={props.node.text} comments={nodeComments()} />
++      <p class="text-[16px] leading-[1.75] text-[#37352f]">
++        <span data-plan-node-id={props.node.id} data-plan-node-text="true" class="select-text">
++          <TextWithHighlights text={props.node.text} comments={nodeComments()} />
++        </span>
 +      </p>
 +    </NodeFrame>
 +  )
@@ -578,8 +658,10 @@ index 000000000..a16404268
 +  } as Record<number, string>
 +  return (
 +    <NodeFrame nodeID={props.node.id} comments={props.comments} onCommentNode={props.onCommentNode}>
-+      <div class={classes[props.node.level] ?? "text-15-semibold"}>
-+        <TextWithHighlights text={props.node.text} comments={nodeComments()} />
++      <div class={`${classes[props.node.level] ?? "text-15-semibold"} text-[#2f3437] tracking-[-0.02em]`}>
++        <span data-plan-node-id={props.node.id} data-plan-node-text="true" class="select-text">
++          <TextWithHighlights text={props.node.text} comments={nodeComments()} />
++        </span>
 +      </div>
 +    </NodeFrame>
 +  )
@@ -591,8 +673,10 @@ index 000000000..a16404268
 +      {(item) => {
 +        const itemComments = createMemo(() => props.comments().filter((comment) => comment.anchor.nodeID === item.id))
 +        return (
-+          <li data-plan-node-id={item.id} classList={{ "rounded-md bg-yellow-100/50 dark:bg-yellow-500/10": itemComments().length > 0 }}>
-+            <TextWithHighlights text={item.text} comments={itemComments()} />
++          <li classList={{ "rounded-md bg-[rgba(47,118,210,0.08)]": itemComments().some((comment) => comment.anchor.kind === "node") }}>
++            <span data-plan-node-id={item.id} data-plan-node-text="true" class="select-text">
++              <TextWithHighlights text={item.text} comments={itemComments()} />
++            </span>
 +          </li>
 +        )
 +      }}
@@ -601,8 +685,8 @@ index 000000000..a16404268
 +
 +  return (
 +    <NodeFrame nodeID={props.node.id} comments={props.comments} onCommentNode={props.onCommentNode}>
-+      <Show when={props.node.ordered} fallback={<ul class="pl-5 space-y-2 text-14-regular leading-6 text-text-strong">{listContent()}</ul>}>
-+        <ol class="pl-5 space-y-2 text-14-regular leading-6 text-text-strong">{listContent()}</ol>
++      <Show when={props.node.ordered} fallback={<ul class="pl-6 space-y-2 text-[15px] leading-7 text-[#37352f] marker:text-[#2f76d2]">{listContent()}</ul>}>
++        <ol class="pl-6 space-y-2 text-[15px] leading-7 text-[#37352f] marker:text-[#2f76d2]">{listContent()}</ol>
 +      </Show>
 +    </NodeFrame>
 +  )
@@ -615,15 +699,16 @@ index 000000000..a16404268
 +    <NodeFrame nodeID={props.node.id} comments={props.comments} onCommentNode={props.onCommentNode}>
 +      <button
 +        data-plan-toggle={props.node.id}
-+        data-plan-node-id={props.node.id}
 +        type="button"
-+        class="text-14-medium text-text-strong underline underline-offset-4"
++        class="text-[14px] font-medium text-[#2f76d2] underline underline-offset-4"
 +        onClick={() => setOpen((value) => !value)}
 +      >
-+        <TextWithHighlights text={props.node.title} comments={nodeComments()} />
++        <span data-plan-node-id={props.node.id} data-plan-node-text="true" class="select-text">
++          <TextWithHighlights text={props.node.title} comments={nodeComments()} />
++        </span>
 +      </button>
 +      <Show when={open()}>
-+        <div class="mt-3 space-y-3 border-l border-border-base pl-4">
++        <div class="mt-3 space-y-3 border-l border-[rgba(55,53,47,0.08)] pl-4">
 +          <For each={props.node.children}>{(child) => <PlanNodeView node={child} comments={props.comments} onCommentNode={props.onCommentNode} />}</For>
 +        </div>
 +      </Show>
@@ -635,9 +720,11 @@ index 000000000..a16404268
 +  const nodeComments = createMemo(() => props.comments().filter((comment) => comment.anchor.nodeID === props.node.id))
 +  return (
 +    <NodeFrame nodeID={props.node.id} comments={props.comments} onCommentNode={props.onCommentNode}>
-+      <div class="rounded-xl bg-background-panel-tertiary px-4 py-3">
-+        <div class="text-13-semibold uppercase tracking-[0.08em] text-text-weak">
-+          <TextWithHighlights text={props.node.title} comments={nodeComments()} />
++      <div class="rounded-2xl border border-[rgba(55,53,47,0.08)] bg-[#fffdf8] px-4 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
++        <div class="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#787774]">
++          <span data-plan-node-id={props.node.id} data-plan-node-text="true" class="select-text">
++            <TextWithHighlights text={props.node.title} comments={nodeComments()} />
++          </span>
 +        </div>
 +        <div class="mt-3 space-y-3">
 +          <For each={props.node.children}>{(child) => <PlanNodeView node={child} comments={props.comments} onCommentNode={props.onCommentNode} />}</For>
@@ -680,23 +767,31 @@ index 000000000..a16404268
 +export function resolveSelectionAnchor(selection: Selection | null): PlanCommentAnchor | null {
 +  if (!selection || selection.rangeCount === 0) return null
 +  const range = selection.getRangeAt(0)
-+  const quote = selection.toString().trim()
-+  if (!quote) return null
-+  const startContainer = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement
-+  const node = startContainer?.closest<HTMLElement>("[data-plan-node-id]")
-+  if (!node) return null
-+  const nodeID = node.dataset.planNodeId
++  if (range.collapsed) return null
++  const startElement = getSelectableNodeElement(range.startContainer)
++  const endElement = getSelectableNodeElement(range.endContainer)
++  if (!startElement || !endElement || startElement !== endElement) return null
++  const nodeID = startElement.dataset.planNodeId
 +  if (!nodeID) return null
-+  const text = node.textContent ?? ""
-+  const start = text.indexOf(quote)
++  const raw = range.toString()
++  const quote = raw.trim()
++  if (!quote) return null
++  const text = startElement.textContent ?? ""
++  const offsetRange = range.cloneRange()
++  offsetRange.selectNodeContents(startElement)
++  offsetRange.setEnd(range.startContainer, range.startOffset)
++  const baseStart = offsetRange.toString().length
++  const lead = raw.indexOf(quote)
++  const start = baseStart + Math.max(0, lead)
++  const end = start + quote.length
 +  return {
 +    kind: "text-range",
 +    nodeID,
 +    quote,
-+    start: start >= 0 ? start : undefined,
-+    end: start >= 0 ? start + quote.length : undefined,
-+    prefix: start > 0 ? text.slice(Math.max(0, start - 24), start) : undefined,
-+    suffix: start >= 0 ? text.slice(start + quote.length, Math.min(text.length, start + quote.length + 24)) : undefined,
++    start,
++    end,
++    prefix: start > 0 ? text.slice(Math.max(0, start - 32), start) : undefined,
++    suffix: text.slice(end, Math.min(text.length, end + 32)) || undefined,
 +  }
 +}
 +
@@ -859,26 +954,27 @@ index 000000000..a16404268
 +  }
 +
 +  return (
-+    <div class="min-h-screen bg-background-base text-text-strong">
-+      <div class="mx-auto flex max-w-[1440px] gap-6 px-4 py-6 lg:px-6">
-+        <div class="min-w-0 flex-1 space-y-5" onMouseUp={captureSelection}>
++    <div style={REVIEW_THEME_STYLE} class="min-h-screen bg-[#fbfbfa] text-[#2f3437]">
++      <div class="mx-auto flex max-w-[1360px] gap-10 px-6 py-10 lg:px-10">
++        <div class="min-w-0 flex-1" onMouseUp={captureSelection}>
++          <div class="mx-auto max-w-[820px] space-y-8">
 +          <Switch>
 +            <Match when={plan.loading}>
-+              <div class="rounded-2xl border border-border-base bg-background-panel px-5 py-6 text-14-regular text-text-weak">
++              <div class="rounded-[24px] border border-[rgba(55,53,47,0.08)] bg-white px-6 py-6 text-[14px] text-[#787774] shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
 +                Loading plan review...
 +              </div>
 +            </Match>
 +            <Match when={plan.error}>
-+              <div class="rounded-2xl border border-border-base bg-background-panel px-5 py-6 text-14-regular text-text-critical-base">
++              <div class="rounded-[24px] border border-[rgba(239,68,68,0.18)] bg-white px-6 py-6 text-[14px] text-[#b42318] shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
 +                {plan.error instanceof Error ? plan.error.message : String(plan.error)}
 +              </div>
 +            </Match>
 +            <Match when={plan()}>
 +              <>
-+                <header class="rounded-2xl border border-border-base bg-background-panel px-5 py-5">
-+                  <div class="text-12-medium uppercase tracking-[0.08em] text-text-weak">User-facing plan</div>
-+                  <h1 class="mt-2 text-24-semibold text-text-strong">{plan()!.document.title}</h1>
-+                  <div class="mt-3 text-13-regular text-text-weak">
++                <header class="border-b border-[rgba(55,53,47,0.08)] pb-6">
++                  <div class="text-[12px] font-medium uppercase tracking-[0.1em] text-[#9b9a97]">Interactive review</div>
++                  <h1 class="mt-3 text-[40px] font-semibold leading-[1.1] tracking-[-0.03em] text-[#2f3437]">{plan()!.document.title}</h1>
++                  <div class="mt-4 text-[13px] text-[#787774]">
 +                    Review revision <code>{plan()!.document.planRevisionID.slice(0, 12)}</code> from <code>{plan()!.sourcePath}</code>
 +                  </div>
 +                </header>
@@ -886,21 +982,21 @@ index 000000000..a16404268
 +                <PlanDocumentView
 +                  document={plan()!.document}
 +                  comments={() => planComments().all()}
-+                  onCommentNode={(nodeID) => setDraftAnchor({ kind: "node", nodeID })}
 +                />
 +              </>
 +            </Match>
 +          </Switch>
 +        </div>
++        </div>
 +
-+        <aside class="w-full max-w-[380px] shrink-0 space-y-4">
-+          <section class="rounded-2xl border border-border-base bg-background-panel px-4 py-4">
-+            <div class="text-13-semibold text-text-strong">Review actions</div>
-+            <div class="mt-2 text-13-regular text-text-weak">
-+              Select text or comment a whole block, then send one aggregated revision request.
++        <aside class="sticky top-8 w-full max-w-[360px] shrink-0 self-start space-y-4">
++          <section class="rounded-[24px] border border-[rgba(55,53,47,0.08)] bg-white px-5 py-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
++            <div class="text-[13px] font-semibold text-[#2f3437]">Review actions</div>
++            <div class="mt-2 text-[13px] leading-6 text-[#787774]">
++              Highlight the exact sentence or phrase you want changed, then add one or more review notes before asking for a revision.
 +            </div>
 +            <Show when={status()}>
-+              <div class="mt-3 rounded-xl bg-background-panel-tertiary px-3 py-2 text-12-regular text-text-weak">{status()}</div>
++              <div class="mt-3 rounded-2xl border border-[rgba(55,53,47,0.06)] bg-[#f7f6f3] px-3 py-3 text-[12px] leading-5 text-[#6f6e69]">{status()}</div>
 +            </Show>
 +            <div class="mt-4 flex flex-col gap-2">
 +              <Button disabled={busy() || Boolean(pendingRevisionID())} onClick={() => void submitReplan()}>
@@ -914,11 +1010,15 @@ index 000000000..a16404268
 +
 +          <Show when={draftAnchor()}>
 +            {(anchor) => (
-+              <section class="rounded-2xl border border-border-base bg-background-panel px-4 py-4">
-+                <div class="text-13-semibold text-text-strong">New comment</div>
-+                <div class="mt-2 text-12-regular text-text-weak">{describeAnchor(anchor())}</div>
++              <section class="rounded-[24px] border border-[rgba(55,53,47,0.08)] bg-white px-5 py-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
++                <div class="text-[13px] font-semibold text-[#2f3437]">New comment</div>
++                <Show when={anchor().kind === "text-range"} fallback={<div class="mt-2 text-[12px] text-[#787774]">{describeAnchor(anchor())}</div>}>
++                  <blockquote class="mt-3 rounded-2xl border border-[rgba(55,53,47,0.06)] bg-[#f7f6f3] px-3 py-3 text-[13px] italic leading-6 text-[#5f5e5b]">
++                    “{anchor().kind === "text-range" ? anchor().quote : ""}”
++                  </blockquote>
++                </Show>
 +                <textarea
-+                  class="mt-3 min-h-[120px] w-full rounded-xl border border-border-base bg-background-base px-3 py-3 text-14-regular text-text-strong"
++                  class="mt-3 min-h-[132px] w-full rounded-2xl border border-[rgba(55,53,47,0.12)] bg-[#fffefc] px-4 py-3 text-[14px] leading-6 text-[#2f3437] shadow-[inset_0_1px_2px_rgba(15,23,42,0.02)]"
 +                  value={draftComment()}
 +                  onInput={(event) => setDraftComment(event.currentTarget.value)}
 +                  placeholder="Describe exactly what you want to change."
@@ -933,17 +1033,17 @@ index 000000000..a16404268
 +            )}
 +          </Show>
 +
-+          <section class="rounded-2xl border border-border-base bg-background-panel px-4 py-4">
++          <section class="rounded-[24px] border border-[rgba(55,53,47,0.08)] bg-white px-5 py-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
 +            <div class="flex items-center justify-between gap-2">
-+              <div class="text-13-semibold text-text-strong">Comments</div>
-+              <div class="text-12-regular text-text-weak">{planComments().all().length}</div>
++              <div class="text-[13px] font-semibold text-[#2f3437]">Comments</div>
++              <div class="text-[12px] text-[#787774]">{planComments().all().length}</div>
 +            </div>
 +            <div class="mt-3 space-y-3">
 +              <For each={planComments().all()}>
 +                {(comment) => (
-+                  <div class="rounded-xl border border-border-base bg-background-panel-tertiary px-3 py-3">
-+                    <div class="text-11-medium uppercase tracking-[0.06em] text-text-weak">{describeAnchor(comment.anchor)}</div>
-+                    <div class="mt-2 text-13-regular text-text-strong">{comment.comment}</div>
++                  <div class="rounded-2xl border border-[rgba(55,53,47,0.06)] bg-[#f7f6f3] px-3 py-3">
++                    <div class="text-[11px] font-medium uppercase tracking-[0.06em] text-[#9b9a97]">{describeAnchor(comment.anchor)}</div>
++                    <div class="mt-2 text-[13px] leading-6 text-[#37352f]">{comment.comment}</div>
 +                    <div class="mt-3 flex gap-2">
 +                      <Button size="small" variant="ghost" onClick={() => planComments().remove(comment.id)}>
 +                        Remove
@@ -953,8 +1053,8 @@ index 000000000..a16404268
 +                )}
 +              </For>
 +              <Show when={planComments().all().length === 0}>
-+                <div class="rounded-xl border border-dashed border-border-base px-3 py-4 text-12-regular text-text-weak">
-+                  Select text or use the block comment buttons to start reviewing.
++                <div class="rounded-2xl border border-dashed border-[rgba(55,53,47,0.12)] px-3 py-4 text-[12px] leading-5 text-[#787774]">
++                  Highlight a sentence in the plan to start a precise review comment.
 +                </div>
 +              </Show>
 +            </div>
@@ -963,6 +1063,36 @@ index 000000000..a16404268
 +      </div>
 +    </div>
 +  )
++}
++
++function getSelectableNodeElement(target: Node | null) {
++  const element = target instanceof Element ? target : target?.parentElement
++  return element?.closest<HTMLElement>("[data-plan-node-text][data-plan-node-id]") ?? null
++}
++
++function resolveTextRange(text: string, anchor: TextRangeAnchor) {
++  if (anchor.start !== undefined && anchor.end !== undefined && text.slice(anchor.start, anchor.end) === anchor.quote) {
++    return { start: anchor.start, end: anchor.end }
++  }
++
++  const matches: number[] = []
++  let cursor = text.indexOf(anchor.quote)
++  while (cursor >= 0) {
++    matches.push(cursor)
++    cursor = text.indexOf(anchor.quote, cursor + Math.max(1, anchor.quote.length))
++  }
++
++  for (const start of matches) {
++    const end = start + anchor.quote.length
++    const prefix = anchor.prefix ? text.slice(Math.max(0, start - anchor.prefix.length), start) : undefined
++    const suffix = anchor.suffix ? text.slice(end, Math.min(text.length, end + anchor.suffix.length)) : undefined
++    if ((anchor.prefix ? prefix === anchor.prefix : true) && (anchor.suffix ? suffix === anchor.suffix : true)) {
++      return { start, end }
++    }
++  }
++
++  if (!matches.length) return null
++  return { start: matches[0], end: matches[0] + anchor.quote.length }
 +}
 
 diff --git a/packages/opencode/package.json b/packages/opencode/package.json
