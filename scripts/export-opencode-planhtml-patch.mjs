@@ -21,6 +21,8 @@ const PATCHED_FILES = [
   "packages/app/src/app.tsx",
   "packages/app/src/context/plan-comments.test.ts",
   "packages/app/src/context/plan-comments.ts",
+  "packages/app/src/pages/layout.test.tsx",
+  "packages/app/src/pages/layout.tsx",
   "packages/app/src/pages/session-plan-types.ts",
   "packages/app/src/pages/session-plan.test.tsx",
   "packages/app/src/pages/session-plan.tsx",

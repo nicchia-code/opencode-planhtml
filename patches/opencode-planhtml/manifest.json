@@ -7,6 +7,8 @@
     "packages/app/src/app.tsx",
     "packages/app/src/context/plan-comments.test.ts",
     "packages/app/src/context/plan-comments.ts",
+    "packages/app/src/pages/layout.test.tsx",
+    "packages/app/src/pages/layout.tsx",
     "packages/app/src/pages/session-plan-types.ts",
     "packages/app/src/pages/session-plan.test.tsx",
     "packages/app/src/pages/session-plan.tsx",
@@ -32,5 +34,5 @@
     "packages/opencode/test/session/plan-html.test.ts",
     "packages/opencode/test/session/plan-user.test.ts"
   ],
-  "generatedAt": "2026-04-02T19:03:07.407Z"
+  "generatedAt": "2026-04-02T19:11:15.333Z"
 }
