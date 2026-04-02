@@ -1510,10 +1510,10 @@ index 000000000..4205fab6b
 
 diff --git a/packages/opencode/src/session/plan-html.ts b/packages/opencode/src/session/plan-html.ts
 new file mode 100644
-index 000000000..4facf480d
+index 000000000..75ca3b3c7
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-html.ts
-@@ -0,0 +1,663 @@
+@@ -0,0 +1,675 @@
 +import fs from "node:fs/promises"
 +import { createHash } from "node:crypto"
 +import { release } from "node:os"
@@ -2096,6 +2096,18 @@ index 000000000..4facf480d
 +  await fs.writeFile(htmlPath, html, "utf8")
 +}
 +
++async function ensurePlanLiveUrl(sessionID: SessionID) {
++  const existing = getPlanServerUrl(sessionID)
++  if (existing) return existing
++
++  const [{ Instance }, { PlanServer }] = await Promise.all([import("../project/instance"), import("./plan-server")])
++  PlanServer.ensure({ directory: Instance.worktree })
++  const liveUrl = getPlanServerUrl(sessionID)
++  if (liveUrl) return liveUrl
++
++  throw new Error(`plan live review URL unavailable for session ${sessionID}`)
++}
++
 +export async function renderPlanArtifacts(input: {
 +  session: Session.Info
 +  markdown: string
@@ -2133,18 +2145,18 @@ index 000000000..4facf480d
 +  let hash = planHash(input.markdown)
 +  let html = renderPlanHtml(input.markdown, markdownPath, { liveUrl })
 +  if (userMarkdown) {
++    liveUrl = ready ? await ensurePlanLiveUrl(input.session.id) : undefined
 +    const document = SessionPlanUser.buildPlanUserDocument(userMarkdown, userMarkdownPath)
 +    htmlPath = userHtmlPath
 +    hash = document.planRevisionID
 +    html = SessionPlanUser.renderPlanUserHtml(document)
 +    await fs.writeFile(userDataPath, JSON.stringify({ document, markdown: userMarkdown }, null, 2), "utf8")
-+    liveUrl = ready ? getPlanServerUrl(input.session.id) : undefined
 +  }
 +  await writeHtml(htmlPath, html)
 +
 +  let opened = false
-+  if (input.autoOpen !== false && ready && openedPlanHashes.get(input.session.id) !== hash) {
-+    opened = await openTarget(liveUrl ?? htmlPath)
++  if (input.autoOpen !== false && ready && openedPlanHashes.get(input.session.id) !== hash && (!userMarkdown || liveUrl)) {
++    opened = await openTarget(userMarkdown ? liveUrl! : htmlPath)
 +    if (opened) openedPlanHashes.set(input.session.id, hash)
 +  }
 +
@@ -3371,16 +3383,17 @@ index 000000000..db46c2513
 
 diff --git a/packages/opencode/test/session/plan-html.test.ts b/packages/opencode/test/session/plan-html.test.ts
 new file mode 100644
-index 000000000..7cbf26b76
+index 000000000..914efcc44
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-html.test.ts
-@@ -0,0 +1,165 @@
-+import { describe, expect, test } from "bun:test"
+@@ -0,0 +1,232 @@
++import { afterEach, describe, expect, spyOn, test } from "bun:test"
 +import fs from "node:fs/promises"
 +import path from "node:path"
 +
 +import { Session } from "../../src/session"
 +import * as SessionPlanHtml from "../../src/session/plan-html"
++import { PlanServer } from "../../src/session/plan-server"
 +import { MessageV2 } from "../../src/session/message-v2"
 +import { MessageID, PartID, SessionID } from "../../src/session/schema"
 +import { Instance } from "../../src/project/instance"
@@ -3409,6 +3422,25 @@ index 000000000..7cbf26b76
 +- Write the renderer
 +- Attach the generated HTML file to the message
 +`
++
++const SAMPLE_USER_PLAN = `# Goal
++Add a user-friendly review surface for the generated plan.
++
++# Piano Razionale
++I will explain the implementation clearly and keep technical details behind toggles.
++
++## Main review flow
++The user can inspect the plan, leave comments, and approve it.
++
++:::toggle[Editero questi file]
++- \`packages/opencode/src/session/plan-user.ts\`
++- \`packages/app/src/pages/session-plan.tsx\`
++:::
++`
++
++afterEach(() => {
++  PlanServer.stop()
++})
 +
 +describe("session.plan-html", () => {
 +  test("builds a plan document with revision metadata and commentable steps", () => {
@@ -3535,6 +3567,53 @@ index 000000000..7cbf26b76
 +        expect(html).toContain("Plan Summary")
 +        expect(html).toContain(path.basename(artifacts.markdownPath))
 +
++        await Session.remove(session.id)
++      },
++    })
++  })
++
++  test("returns a live review url for user-facing plans", async () => {
++    await using tmp = await tmpdir({ git: true })
++
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        const artifacts = await SessionPlanHtml.renderPlanArtifacts({
++          session,
++          markdown: SAMPLE_PLAN,
++          userMarkdown: SAMPLE_USER_PLAN,
++          autoOpen: false,
++        })
++
++        expect(artifacts.liveUrl).toBeTruthy()
++        expect(new URL(artifacts.liveUrl!).pathname).toContain(`/session/${session.id}/plan`)
++        expect(new URL(artifacts.liveUrl!).searchParams.get("plan-token")).toBeTruthy()
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++
++  test("throws when a user-facing plan cannot publish a live review url", async () => {
++    await using tmp = await tmpdir({ git: true })
++
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const ensure = spyOn(PlanServer, "ensure").mockImplementation(() => ({ url: "http://127.0.0.1:1", token: "plan-token" }))
++        const session = await Session.create({})
++
++        await expect(
++          SessionPlanHtml.renderPlanArtifacts({
++            session,
++            markdown: SAMPLE_PLAN,
++            userMarkdown: SAMPLE_USER_PLAN,
++            autoOpen: false,
++          }),
++        ).rejects.toThrow("plan live review URL unavailable")
++
++        ensure.mockRestore()
 +        await Session.remove(session.id)
 +      },
 +    })
