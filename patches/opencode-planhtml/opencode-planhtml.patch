@@ -1,5 +1,5 @@
 diff --git a/packages/opencode/package.json b/packages/opencode/package.json
-index d97046c..98af15e 100644
+index d97046ca9..98af15e98 100644
 --- a/packages/opencode/package.json
 +++ b/packages/opencode/package.json
 @@ -130,6 +130,7 @@
@@ -12,7 +12,7 @@ index d97046c..98af15e 100644
      "open": "10.1.2",
 
 diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
-index 96b71f8..9a2d89c 100644
+index 96b71f816..9a2d89c56 100644
 --- a/packages/opencode/src/agent/agent.ts
 +++ b/packages/opencode/src/agent/agent.ts
 @@ -128,6 +128,7 @@ export namespace Agent {
@@ -24,8 +24,43 @@ index 96b71f8..9a2d89c 100644
                      [path.join(Global.Path.data, "plans", "*")]: "allow",
                    },
 
+diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
+index a83645d89..1bda19701 100644
+--- a/packages/opencode/src/cli/cmd/tui/worker.ts
++++ b/packages/opencode/src/cli/cmd/tui/worker.ts
+@@ -13,6 +13,7 @@ import { Flag } from "@/flag/flag"
+ import { setTimeout as sleep } from "node:timers/promises"
+ import { writeHeapSnapshot } from "node:v8"
+ import { WorkspaceID } from "@/control-plane/schema"
++import { PlanServer } from "@/session/plan-server"
+ 
+ await Log.init({
+   print: process.argv.includes("--print-logs"),
+@@ -109,6 +110,13 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
+ }
+ 
+ startEventStream({ directory: process.cwd() })
++try {
++  PlanServer.ensure({ directory: process.cwd() })
++} catch (error) {
++  Log.Default.warn("plan server failed to start", {
++    error: error instanceof Error ? error.message : String(error),
++  })
++}
+ 
+ export const rpc = {
+   async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
+@@ -158,6 +166,7 @@ export const rpc = {
+     Log.Default.info("worker shutting down")
+     if (eventStream.abort) eventStream.abort.abort()
+     await Instance.disposeAll()
++    PlanServer.stop()
+     if (server) await server.stop(true)
+   },
+ }
+
 diff --git a/packages/opencode/src/flag/flag.ts b/packages/opencode/src/flag/flag.ts
-index 27190f2..7f11969 100644
+index 27190f2eb..7f11969d9 100644
 --- a/packages/opencode/src/flag/flag.ts
 +++ b/packages/opencode/src/flag/flag.ts
 @@ -27,6 +27,7 @@ export namespace Flag {
@@ -37,8 +72,134 @@ index 27190f2..7f11969 100644
    export const OPENCODE_DISABLE_AUTOCOMPACT = truthy("OPENCODE_DISABLE_AUTOCOMPACT")
    export const OPENCODE_DISABLE_MODELS_FETCH = truthy("OPENCODE_DISABLE_MODELS_FETCH")
 
+diff --git a/packages/opencode/src/server/instance.ts b/packages/opencode/src/server/instance.ts
+index 4bb6efaf9..be15bdf93 100644
+--- a/packages/opencode/src/server/instance.ts
++++ b/packages/opencode/src/server/instance.ts
+@@ -17,6 +17,7 @@ import { Flag } from "../flag/flag"
+ import { QuestionRoutes } from "./routes/question"
+ import { PermissionRoutes } from "./routes/permission"
+ import { ProjectRoutes } from "./routes/project"
++import { SessionPlanRoutes } from "./routes/session-plan"
+ import { SessionRoutes } from "./routes/session"
+ import { PtyRoutes } from "./routes/pty"
+ import { McpRoutes } from "./routes/mcp"
+@@ -47,6 +48,7 @@ export const InstanceRoutes = (app?: Hono) =>
+     .route("/pty", PtyRoutes())
+     .route("/config", ConfigRoutes())
+     .route("/experimental", ExperimentalRoutes())
++    .route("/session", SessionPlanRoutes())
+     .route("/session", SessionRoutes())
+     .route("/permission", PermissionRoutes())
+     .route("/question", QuestionRoutes())
+
+diff --git a/packages/opencode/src/server/routes/session-plan.ts b/packages/opencode/src/server/routes/session-plan.ts
+new file mode 100644
+index 000000000..2ff920b47
+--- /dev/null
++++ b/packages/opencode/src/server/routes/session-plan.ts
+@@ -0,0 +1,98 @@
++import fs from "node:fs/promises"
++import { Hono } from "hono"
++import { validator } from "hono-openapi"
++import z from "zod"
++
++import { SessionID } from "@/session/schema"
++import { Session } from "../../session"
++import * as SessionPlanAction from "../../session/plan-action"
++import * as SessionPlanHtml from "../../session/plan-html"
++import { lazy } from "../../util/lazy"
++
++const params = z.object({
++  sessionID: SessionID.zod,
++})
++
++export const SessionPlanRoutes = lazy(() =>
++  new Hono()
++    .get("/:sessionID/plan", validator("param", params), async (c) => {
++      const sessionID = c.req.valid("param").sessionID
++      const token = c.req.query("token") || c.req.header("x-opencode-plan-token") || undefined
++
++      try {
++        const session = await Session.get(sessionID)
++        const sourcePath = Session.plan(session)
++        const markdown = await fs.readFile(sourcePath, "utf8")
++        const document = SessionPlanHtml.buildPlanDocument(markdown, sourcePath)
++        const html = SessionPlanHtml.renderInteractivePlanHtml({
++          document,
++          sessionID,
++          replanUrl: `/session/${sessionID}/plan/replan`,
++          proceedUrl: `/session/${sessionID}/plan/proceed`,
++          token,
++        })
++
++        return new Response(html, {
++          headers: {
++            "content-type": "text/html; charset=utf-8",
++          },
++        })
++      } catch (error) {
++        if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
++          return c.json({ error: "plan_not_found" }, 404)
++        }
++        throw error
++      }
++    })
++    .post(
++      "/:sessionID/plan/replan",
++      validator("param", params),
++      validator("json", SessionPlanAction.ReplanInput),
++      async (c) => {
++        const sessionID = c.req.valid("param").sessionID
++
++        try {
++          const result = await SessionPlanAction.requestPlanRevision(sessionID, c.req.valid("json"))
++          return c.json(result)
++        } catch (error) {
++          if (error instanceof SessionPlanAction.StalePlanRevisionError) {
++            return c.json(
++              {
++                error: "stale_plan_revision",
++                currentPlanRevisionID: error.currentPlanRevisionID,
++              },
++              409,
++            )
++          }
++          throw error
++        }
++      },
++    )
++    .post(
++      "/:sessionID/plan/proceed",
++      validator("param", params),
++      validator("json", SessionPlanAction.ProceedInput),
++      async (c) => {
++        const sessionID = c.req.valid("param").sessionID
++
++        try {
++          const result = await SessionPlanAction.proceedPlan(sessionID, c.req.valid("json"))
++          return c.json(result)
++        } catch (error) {
++          if (error instanceof SessionPlanAction.StalePlanRevisionError) {
++            return c.json(
++              {
++                error: "stale_plan_revision",
++                currentPlanRevisionID: error.currentPlanRevisionID,
++              },
++              409,
++            )
++          }
++          if (error instanceof SessionPlanAction.PlanNotReadyError) {
++            return c.json({ error: "plan_not_ready" }, 409)
++          }
++          throw error
++        }
++      },
++    ),
++)
+
 diff --git a/packages/opencode/src/session/index.ts b/packages/opencode/src/session/index.ts
-index 5ed5aca..a7620b5 100644
+index 5ed5acafa..a7620b574 100644
 --- a/packages/opencode/src/session/index.ts
 +++ b/packages/opencode/src/session/index.ts
 @@ -242,6 +242,10 @@ export namespace Session {
@@ -53,12 +214,291 @@ index 5ed5aca..a7620b5 100644
      model: Provider.Model
      usage: LanguageModelV2Usage
 
+diff --git a/packages/opencode/src/session/plan-action.ts b/packages/opencode/src/session/plan-action.ts
+new file mode 100644
+index 000000000..5b096a34e
+--- /dev/null
++++ b/packages/opencode/src/session/plan-action.ts
+@@ -0,0 +1,242 @@
++import fs from "node:fs/promises"
++import path from "node:path"
++import { setTimeout as sleep } from "node:timers/promises"
++import z from "zod"
++
++import { Log } from "@/util/log"
++import { Session } from "./index"
++import { Question } from "../question"
++import { SessionPrompt } from "./prompt"
++import { SessionStatus } from "./status"
++import { MessageV2 } from "./message-v2"
++import { MessageID, PartID, type SessionID } from "./schema"
++import { Provider } from "../provider/provider"
++import { Instance } from "../project/instance"
++import * as SessionPlanHtml from "./plan-html"
++
++const log = Log.create({ service: "session.plan-action" })
++
++export class StalePlanRevisionError extends Error {
++  constructor(
++    readonly currentPlanRevisionID: string,
++    readonly requestedPlanRevisionID: string,
++  ) {
++    super("The current plan revision does not match the requested revision")
++  }
++}
++
++export class PlanNotReadyError extends Error {
++  constructor() {
++    super("The plan is not ready to proceed yet")
++  }
++}
++
++export const PlanComment = z.object({
++  sectionID: z.string(),
++  title: z.string(),
++  note: z.string(),
++})
++
++export const ReplanInput = z.object({
++  planRevisionID: z.string(),
++  comments: z.array(PlanComment).min(1),
++})
++
++export const ProceedInput = z.object({
++  planRevisionID: z.string(),
++})
++
++async function getLastModel(sessionID: SessionID) {
++  for await (const item of MessageV2.stream(sessionID)) {
++    if (item.info.role === "user" && item.info.model) return item.info.model
++  }
++  return Provider.defaultModel()
++}
++
++async function getCurrentPlan(sessionID: SessionID) {
++  const session = await Session.get(sessionID)
++  const sourcePath = Session.plan(session)
++  const markdown = await fs.readFile(sourcePath, "utf8")
++  const document = SessionPlanHtml.buildPlanDocument(markdown, sourcePath)
++  return { session, sourcePath, markdown, document }
++}
++
++async function waitForIdle(sessionID: SessionID, timeoutMs = 4000) {
++  const started = Date.now()
++  while (Date.now() - started < timeoutMs) {
++    const status = await SessionStatus.get(sessionID)
++    if (status.type === "idle") return
++    await sleep(50)
++  }
++}
++
++function normalizeComments(comments: z.infer<typeof PlanComment>[]) {
++  return comments
++    .map((comment) => ({
++      sectionID: comment.sectionID,
++      title: comment.title.trim(),
++      note: comment.note.trim(),
++    }))
++    .filter((comment) => comment.note.length > 0)
++}
++
++function formatReplanPrompt(
++  document: SessionPlanHtml.PlanDocument,
++  comments: Array<{ sectionID: string; title: string; note: string }>,
++) {
++  const bySection = new Map(document.sections.map((section) => [section.id, section]))
++  const lines = [
++    "Revise the current plan using the user comments below.",
++    "",
++    "Preserve the overall plan structure unless a requested change requires otherwise.",
++    "Keep untouched steps as-is when possible.",
++    "Return a complete updated plan that still follows:",
++    "# Goal",
++    "# Plan Rationale",
++    "# Actions",
++    "## Step N",
++    "What:",
++    "Why:",
++    "Files/Tests:",
++    "",
++    "Requested revisions:",
++  ]
++
++  comments.forEach((comment, index) => {
++    const section = bySection.get(comment.sectionID)
++    lines.push(`${index + 1}. ${comment.title}`)
++    if (section?.action) lines.push(`Current What: ${section.action}`)
++    if (section?.why) lines.push(`Current Why: ${section.why}`)
++    if (section?.filesTests) lines.push(`Current Files/Tests: ${section.filesTests}`)
++    lines.push(`Requested change: ${comment.note}`)
++    lines.push("")
++  })
++
++  return lines.join("\n").trim()
++}
++
++export async function findPendingBuildQuestion(sessionID: SessionID) {
++  const pending = await Question.list()
++  return pending.find((request) => {
++    if (request.sessionID !== sessionID) return false
++    const question = request.questions[0]
++    if (!question) return false
++    if (question.header !== "Build Agent") return false
++    const labels = question.options.map((option) => option.label)
++    return labels.includes("Yes") && labels.includes("No")
++  })
++}
++
++export async function assertCurrentPlanRevision(sessionID: SessionID, planRevisionID: string) {
++  const current = await getCurrentPlan(sessionID)
++  if (current.document.planRevisionID !== planRevisionID) {
++    throw new StalePlanRevisionError(current.document.planRevisionID, planRevisionID)
++  }
++  return current
++}
++
++export async function approvePlan(sessionID: SessionID) {
++  const session = await Session.get(sessionID)
++  const plan = path.relative(Instance.worktree, Session.plan(session))
++  const model = await getLastModel(sessionID)
++
++  const userMsg: MessageV2.User = {
++    id: MessageID.ascending(),
++    sessionID,
++    role: "user",
++    time: {
++      created: Date.now(),
++    },
++    agent: "build",
++    model,
++  }
++  await Session.updateMessage(userMsg)
++  await Session.updatePart({
++    id: PartID.ascending(),
++    messageID: userMsg.id,
++    sessionID,
++    type: "text",
++    text: `The plan at ${plan} has been approved, you can now edit files. Execute the plan`,
++    synthetic: true,
++  } satisfies MessageV2.TextPart)
++
++  return { plan }
++}
++
++export async function requestPlanRevision(sessionID: SessionID, input: z.input<typeof ReplanInput>) {
++  const parsed = ReplanInput.parse(input)
++  const current = await assertCurrentPlanRevision(sessionID, parsed.planRevisionID)
++  const comments = normalizeComments(parsed.comments)
++
++  if (!comments.length) {
++    throw new Error("At least one comment is required")
++  }
++
++  const knownSections = new Set(current.document.sections.map((section) => section.id))
++  for (const comment of comments) {
++    if (!knownSections.has(comment.sectionID)) {
++      throw new Error(`Unknown plan section: ${comment.sectionID}`)
++    }
++  }
++
++  const pending = await findPendingBuildQuestion(sessionID)
++  if (pending) {
++    await Question.reply({
++      requestID: pending.id,
++      answers: [["No"]],
++    })
++  }
++
++  const prompt = formatReplanPrompt(current.document, comments)
++  const startPrompt = Instance.bind(async () => {
++    await waitForIdle(sessionID)
++    const model = await getLastModel(sessionID)
++    await SessionPrompt.prompt({
++      sessionID,
++      agent: "plan",
++      model,
++      parts: [{ type: "text", text: prompt }],
++    })
++  })
++  void Promise.resolve()
++    .then(startPrompt)
++    .catch((error) => {
++      log.error("replan request failed", {
++        sessionID,
++        error: error instanceof Error ? error.message : String(error),
++      })
++    })
++
++  return {
++    accepted: true as const,
++    commentCount: comments.length,
++  }
++}
++
++export async function proceedPlan(sessionID: SessionID, input: z.input<typeof ProceedInput>) {
++  const parsed = ProceedInput.parse(input)
++  await assertCurrentPlanRevision(sessionID, parsed.planRevisionID)
++
++  const pending = await findPendingBuildQuestion(sessionID)
++  if (pending) {
++    await Question.reply({
++      requestID: pending.id,
++      answers: [["Yes"]],
++    })
++    return {
++      accepted: true as const,
++      source: "question" as const,
++    }
++  }
++
++  const status = await SessionStatus.get(sessionID)
++  if (status.type !== "idle") {
++    throw new PlanNotReadyError()
++  }
++
++  await approvePlan(sessionID)
++  return {
++    accepted: true as const,
++    source: "direct" as const,
++  }
++}
+
+diff --git a/packages/opencode/src/session/plan-control.ts b/packages/opencode/src/session/plan-control.ts
+new file mode 100644
+index 000000000..01c5efe2a
+--- /dev/null
++++ b/packages/opencode/src/session/plan-control.ts
+@@ -0,0 +1,23 @@
++import type { SessionID } from "@/session/schema"
++
++type PlanServerInfo = {
++  url: string
++  token: string
++}
++
++let current: PlanServerInfo | undefined
++
++export function setPlanServer(info?: PlanServerInfo) {
++  current = info
++}
++
++export function getPlanServer() {
++  return current ? { ...current } : undefined
++}
++
++export function getPlanServerUrl(sessionID: SessionID) {
++  if (!current) return
++  const url = new URL(`/session/${sessionID}/plan`, current.url)
++  url.searchParams.set("token", current.token)
++  return url.toString()
++}
+
 diff --git a/packages/opencode/src/session/plan-html.ts b/packages/opencode/src/session/plan-html.ts
 new file mode 100644
-index 0000000..7de4856
+index 000000000..7f06ae5ce
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-html.ts
-@@ -0,0 +1,437 @@
+@@ -0,0 +1,627 @@
 +import fs from "node:fs/promises"
 +import { createHash } from "node:crypto"
 +import { release } from "node:os"
@@ -71,6 +511,7 @@ index 0000000..7de4856
 +import { PartID, type MessageID, type SessionID } from "@/session/schema"
 +import { Process } from "@/util/process"
 +import { which } from "@/util/which"
++import { getPlanServerUrl } from "./plan-control"
 +import { Session } from "./index"
 +import type { MessageV2 } from "./message-v2"
 +
@@ -79,6 +520,35 @@ index 0000000..7de4856
 +  title: string
 +  id: string
 +  body: string
++}
++
++export type PlanSummaryRow = {
++  title: string
++  id: string
++  action: string
++  why: string
++}
++
++export type PlanSection = {
++  level: number
++  title: string
++  id: string
++  body: string
++  bodyHtml: string
++  action?: string
++  why?: string
++  filesTests?: string
++  commentable: boolean
++}
++
++export type PlanDocument = {
++  title: string
++  sourcePath: string
++  generatedAt: string
++  planRevisionID: string
++  leadHtml: string
++  sections: PlanSection[]
++  summaryRows: PlanSummaryRow[]
 +}
 +
 +const SUMMARY_EXCLUDED_TITLES = new Set([
@@ -261,43 +731,101 @@ index 0000000..7de4856
 +  return normalized || "Plan"
 +}
 +
-+function htmlTemplate(input: {
-+  title: string
-+  leadHtml: string
-+  sections: Section[]
-+  summaryRows: Array<{ title: string; id: string; action: string; why: string }>
-+  sourcePath: string
-+  generatedAt: string
-+}) {
-+  const sectionHtml = input.sections
-+    .filter((section) => !RENDER_OMITTED_TITLES.has(section.title.trim().toLowerCase()))
++function planStyles() {
++  return [
++    ":root { color-scheme: light dark; --bg: #f5f5f4; --panel: #ffffff; --panel-muted: #fafaf9; --text: #1c1917; --muted: #57534e; --border: #d6d3d1; --accent: #0f766e; --accent-strong: #115e59; --danger: #b91c1c; --code: #f5f5f4; --shadow: 0 1px 2px rgba(0, 0, 0, 0.04); }",
++    "@media (prefers-color-scheme: dark) { :root { --bg: #111111; --panel: #171717; --panel-muted: #1f1f1f; --text: #f5f5f5; --muted: #a3a3a3; --border: #333333; --accent: #5eead4; --accent-strong: #99f6e4; --danger: #f87171; --code: #202020; --shadow: none; } }",
++    "* { box-sizing: border-box; }",
++    "html { scroll-behavior: smooth; }",
++    "body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }",
++    "main { max-width: 1040px; margin: 0 auto; padding: 32px 16px 120px; }",
++    "header { margin-bottom: 24px; padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); box-shadow: var(--shadow); }",
++    "h1, h2, h3, h4 { margin: 0 0 12px; line-height: 1.2; font-weight: 600; }",
++    "h1 { font-size: clamp(1.8rem, 3vw, 2.4rem); }",
++    "h2 { font-size: 1.15rem; }",
++    "h3 { font-size: 1rem; }",
++    "p, li { line-height: 1.6; }",
++    "a { color: var(--accent); text-decoration: none; }",
++    "a:hover { text-decoration: underline; }",
++    "code { font-family: 'SFMono-Regular', Consolas, monospace; background: var(--code); padding: 0.15rem 0.35rem; border-radius: 6px; }",
++    "pre { overflow-x: auto; padding: 14px; border-radius: 10px; background: var(--code); border: 1px solid var(--border); }",
++    "pre code { padding: 0; background: transparent; }",
++    ".meta { color: var(--muted); font-size: 0.92rem; }",
++    ".lead { margin-top: 16px; }",
++    ".banner { margin-top: 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-muted); }",
++    ".plan-section { margin-top: 18px; padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); box-shadow: var(--shadow); }",
++    ".section-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }",
++    ".chip { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel-muted); color: var(--muted); font-size: 0.85rem; }",
++    "table { width: 100%; border-collapse: collapse; margin-top: 12px; }",
++    "th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }",
++    "th { font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }",
++    ".note-block { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }",
++    ".note-block label { display: block; margin-bottom: 8px; font-size: 0.92rem; font-weight: 600; }",
++    "textarea { width: 100%; min-height: 116px; resize: vertical; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-muted); color: var(--text); font: inherit; }",
++    ".actions { position: sticky; bottom: 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 24px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter: blur(12px); box-shadow: var(--shadow); }",
++    ".actions-copy { display: flex; flex-direction: column; gap: 4px; }",
++    ".actions-copy strong { font-size: 0.96rem; }",
++    ".actions-controls { display: flex; flex-wrap: wrap; gap: 10px; }",
++    "button { border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; background: var(--panel-muted); color: var(--text); font: inherit; cursor: pointer; }",
++    "button.primary { background: var(--accent); border-color: var(--accent); color: white; }",
++    "button.primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }",
++    "button:disabled { opacity: 0.6; cursor: wait; }",
++    ".status-error { color: var(--danger); }",
++    "ul, ol { padding-left: 1.5rem; }",
++    "@media (max-width: 720px) { main { padding: 18px 12px 100px; } header, .plan-section { padding: 16px; } .actions { position: static; flex-direction: column; align-items: stretch; } .actions-controls { flex-direction: column; } table, thead, tbody, tr, th, td { display: block; } th { padding-bottom: 0; } td { padding-top: 6px; } }",
++  ].join("\n")
++}
++
++function renderSummaryTable(summaryRows: PlanSummaryRow[]) {
++  if (!summaryRows.length) return ""
++  return [
++    `<section class="plan-section" id="plan-summary">`,
++    `<h2><a href="#plan-summary">Plan Summary</a></h2>`,
++    `<table>`,
++    `<thead><tr><th>Step</th><th>Action</th><th>Why</th><th>Link</th></tr></thead>`,
++    `<tbody>`,
++    ...summaryRows.map(
++      (row) =>
++        `<tr><td>${renderInline(row.title)}</td><td>${renderInline(row.action)}</td><td>${renderInline(row.why)}</td><td><a href="#${row.id}">Jump</a></td></tr>`,
++    ),
++    `</tbody>`,
++    `</table>`,
++    `</section>`,
++  ].join("\n")
++}
++
++function renderSectionMeta(section: PlanSection) {
++  const chips = [
++    section.action ? `<span class="chip"><strong>What</strong> ${renderInline(section.action)}</span>` : "",
++    section.why ? `<span class="chip"><strong>Why</strong> ${renderInline(section.why)}</span>` : "",
++    section.filesTests ? `<span class="chip"><strong>Files/Tests</strong> ${renderInline(section.filesTests)}</span>` : "",
++  ].filter(Boolean)
++  if (!chips.length) return ""
++  return `<div class="section-meta">${chips.join("")}</div>`
++}
++
++function renderSnapshotSections(sections: PlanSection[]) {
++  return sections
 +    .map((section) => {
 +      const level = Math.min(Math.max(section.level, 2), 4)
 +      return [
 +        `<section class="plan-section" id="${section.id}">`,
 +        `<h${level}><a href="#${section.id}">${renderInline(section.title)}</a></h${level}>`,
-+        renderMarkdownFragment(section.body),
++        renderSectionMeta(section),
++        section.bodyHtml,
 +        `</section>`,
 +      ].join("\n")
 +    })
 +    .join("\n")
++}
 +
-+  const summaryTable = input.summaryRows.length
-+    ? [
-+        `<section class="plan-section" id="plan-summary">`,
-+        `<h2><a href="#plan-summary">Plan Summary</a></h2>`,
-+        `<table>`,
-+        `<thead><tr><th>Step</th><th>Action</th><th>Why</th><th>Link</th></tr></thead>`,
-+        `<tbody>`,
-+        ...input.summaryRows.map(
-+          (row) =>
-+            `<tr><td>${renderInline(row.title)}</td><td>${renderInline(row.action)}</td><td>${renderInline(row.why)}</td><td><a href="#${row.id}">Jump</a></td></tr>`,
-+        ),
-+        `</tbody>`,
-+        `</table>`,
-+        `</section>`,
-+      ].join("\n")
-+    : ""
++function serializeForScript(value: unknown) {
++  return JSON.stringify(value).replace(/</g, "\\u003c")
++}
++
++function snapshotTemplate(input: { document: PlanDocument; liveUrl?: string }) {
++  const summaryTable = renderSummaryTable(input.document.summaryRows)
++  const sectionHtml = renderSnapshotSections(input.document.sections)
 +
 +  return [
 +    "<!doctype html>",
@@ -305,44 +833,119 @@ index 0000000..7de4856
 +    "<head>",
 +    '  <meta charset="utf-8">',
 +    '  <meta name="viewport" content="width=device-width, initial-scale=1">',
-+    `  <title>${escapeHtml(input.title)}</title>`,
++    `  <title>${escapeHtml(input.document.title)}</title>`,
 +    "  <style>",
-+    "    :root { color-scheme: light dark; --bg: #f6f1e8; --panel: #fffdf9; --text: #1f1a14; --muted: #6f6558; --border: #d7c8b2; --accent: #8a4b11; --accent-soft: #f2dec6; --code: #f0e6d8; }",
-+    "    @media (prefers-color-scheme: dark) { :root { --bg: #181511; --panel: #211b15; --text: #f5eee5; --muted: #c6b39a; --border: #4a3b2b; --accent: #f0a35a; --accent-soft: #33261a; --code: #2a221a; } }",
-+    "    * { box-sizing: border-box; }",
-+    "    body { margin: 0; font-family: Georgia, 'Times New Roman', serif; background: linear-gradient(180deg, var(--bg), color-mix(in srgb, var(--bg) 70%, white 30%)); color: var(--text); }",
-+    "    main { max-width: 980px; margin: 0 auto; padding: 40px 20px 72px; }",
-+    "    header { margin-bottom: 32px; padding: 24px 28px; border: 1px solid var(--border); border-radius: 20px; background: var(--panel); box-shadow: 0 16px 50px rgba(0, 0, 0, 0.08); }",
-+    "    h1, h2, h3, h4 { font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, serif; line-height: 1.15; }",
-+    "    h1 { margin: 0 0 12px; font-size: clamp(2rem, 3vw, 3rem); }",
-+    "    h2 { margin: 0 0 14px; font-size: 1.6rem; }",
-+    "    h3 { margin: 0 0 12px; font-size: 1.2rem; }",
-+    "    p, li { line-height: 1.65; }",
-+    "    code { font-family: 'SFMono-Regular', 'Consolas', monospace; background: var(--code); padding: 0.15rem 0.35rem; border-radius: 6px; }",
-+    "    pre { overflow-x: auto; padding: 16px; border-radius: 14px; background: var(--code); border: 1px solid var(--border); }",
-+    "    pre code { padding: 0; background: transparent; }",
-+    "    a { color: var(--accent); }",
-+    "    .meta { color: var(--muted); font-size: 0.95rem; }",
-+    "    .lead { margin-top: 18px; }",
-+    "    .plan-section { margin-top: 24px; padding: 24px 28px; border: 1px solid var(--border); border-radius: 20px; background: var(--panel); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05); }",
-+    "    table { width: 100%; border-collapse: collapse; margin-top: 12px; }",
-+    "    th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }",
-+    "    th { font-size: 0.9rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }",
-+    "    ul, ol { padding-left: 1.5rem; }",
-+    "    @media (max-width: 720px) { main { padding: 20px 14px 40px; } header, .plan-section { padding: 18px; } table, thead, tbody, tr, th, td { display: block; } th { padding-bottom: 0; } td { padding-top: 6px; } }",
++    planStyles(),
 +    "  </style>",
 +    "</head>",
 +    "<body>",
 +    "  <main>",
 +    "    <header>",
-+    `      <p class="meta">Generated ${escapeHtml(input.generatedAt)}</p>`,
-+    `      <h1>${renderInline(input.title)}</h1>`,
-+    `      <p class="meta">Source plan: <code>${escapeHtml(input.sourcePath)}</code></p>`,
-+    input.leadHtml ? `      <div class="lead">${input.leadHtml}</div>` : "",
++    `      <p class="meta">Generated ${escapeHtml(input.document.generatedAt)}</p>`,
++    `      <h1>${renderInline(input.document.title)}</h1>`,
++    `      <p class="meta">Source plan: <code>${escapeHtml(input.document.sourcePath)}</code></p>`,
++    input.document.leadHtml ? `      <div class="lead">${input.document.leadHtml}</div>` : "",
++    input.liveUrl
++      ? `      <p class="banner"><a href="${escapeHtml(input.liveUrl)}">Open interactive plan</a> to comment on steps, propose a revision, or proceed directly into build mode.</p>`
++      : "",
 +    "    </header>",
 +    summaryTable,
 +    sectionHtml,
 +    "  </main>",
++    "</body>",
++    "</html>",
++  ].join("\n")
++}
++
++export function renderInteractivePlanHtml(input: {
++  document: PlanDocument
++  sessionID: SessionID
++  replanUrl: string
++  proceedUrl: string
++  token?: string
++}) {
++  const sections = input.document.sections
++    .map((section) => {
++      const level = Math.min(Math.max(section.level, 2), 4)
++      const noteBlock = section.commentable
++        ? [
++            `<div class="note-block">`,
++            `<label for="note-${section.id}">Save notes for this step</label>`,
++            `<textarea id="note-${section.id}" data-note-input data-section-id="${section.id}" data-section-title="${escapeHtml(section.title)}" placeholder="Describe exactly what should change in this step."></textarea>`,
++            `</div>`,
++          ].join("\n")
++        : ""
++      return [
++        `<section class="plan-section" id="${section.id}"${section.commentable ? ` data-section-id="${section.id}"` : ""}>`,
++        `<h${level}><a href="#${section.id}">${renderInline(section.title)}</a></h${level}>`,
++        renderSectionMeta(section),
++        section.bodyHtml,
++        noteBlock,
++        `</section>`,
++      ].join("\n")
++    })
++    .join("\n")
++
++  const state = {
++    sessionID: input.sessionID,
++    planRevisionID: input.document.planRevisionID,
++    replanUrl: input.replanUrl,
++    proceedUrl: input.proceedUrl,
++    token: input.token,
++    storageKey: `opencode-plan-comments:${input.sessionID}:${input.document.planRevisionID}`,
++  }
++
++  return [
++    "<!doctype html>",
++    '<html lang="en">',
++    "<head>",
++    '  <meta charset="utf-8">',
++    '  <meta name="viewport" content="width=device-width, initial-scale=1">',
++    `  <title>${escapeHtml(input.document.title)}</title>`,
++    "  <style>",
++    planStyles(),
++    "  </style>",
++    "</head>",
++    `<body data-session-id="${input.sessionID}" data-plan-revision-id="${input.document.planRevisionID}">`,
++    "  <main>",
++    "    <header>",
++    `      <p class="meta">Live plan review</p>`,
++    `      <h1>${renderInline(input.document.title)}</h1>`,
++    `      <p class="meta">Plan revision <code>${escapeHtml(input.document.planRevisionID.slice(0, 12))}</code> · Source <code>${escapeHtml(input.document.sourcePath)}</code></p>`,
++    input.document.leadHtml ? `      <div class="lead">${input.document.leadHtml}</div>` : "",
++    "    </header>",
++    renderSummaryTable(input.document.summaryRows),
++    sections,
++    '    <section class="actions" aria-label="Plan actions">',
++    '      <div class="actions-copy">',
++    '        <strong>Review the plan, leave notes where needed, then send one revision request.</strong>',
++    '        <span class="meta" data-plan-status>Ready to review.</span>',
++    '      </div>',
++    '      <div class="actions-controls">',
++    '        <button class="primary" type="button" data-action="replan">Propose Revised Plan</button>',
++    '        <button type="button" data-action="proceed">Proceed</button>',
++    '      </div>',
++    '    </section>',
++    "  </main>",
++    "  <script>",
++    `    const PLAN_PAGE = ${serializeForScript(state)};`,
++    `    const noteInputs = Array.from(document.querySelectorAll('[data-note-input]'));`,
++    `    const statusEl = document.querySelector('[data-plan-status]');`,
++    `    const replanButton = document.querySelector('[data-action="replan"]');`,
++    `    const proceedButton = document.querySelector('[data-action="proceed"]');`,
++    "    const readDraft = () => { try { return JSON.parse(localStorage.getItem(PLAN_PAGE.storageKey) || '{}'); } catch { return {}; } };",
++    "    const writeDraft = (value) => localStorage.setItem(PLAN_PAGE.storageKey, JSON.stringify(value));",
++    "    const setStatus = (message, error = false) => { if (!statusEl) return; statusEl.textContent = message; statusEl.classList.toggle('status-error', error); };",
++    "    const collectComments = () => noteInputs.map((input) => ({ sectionID: input.dataset.sectionId || '', title: input.dataset.sectionTitle || '', note: input.value.trim() })).filter((item) => item.note.length > 0);",
++    "    const syncDraft = () => { const next = Object.fromEntries(noteInputs.map((input) => [input.dataset.sectionId || '', input.value])); writeDraft(next); };",
++    "    const setBusy = (busy) => { if (replanButton) replanButton.disabled = busy; if (proceedButton) proceedButton.disabled = busy; };",
++    "    const headers = () => { const result = { 'content-type': 'application/json' }; if (PLAN_PAGE.token) result['x-opencode-plan-token'] = PLAN_PAGE.token; return result; };",
++    "    const send = async (url, body) => { const res = await fetch(url, { method: 'POST', headers: headers(), body: JSON.stringify(body) }); if (!res.ok) { const payload = await res.json().catch(() => ({})); throw new Error(payload.error || `request_failed_${res.status}`); } return res.json().catch(() => ({})); };",
++    "    const draft = readDraft();",
++    "    for (const input of noteInputs) { const key = input.dataset.sectionId || ''; input.value = typeof draft[key] === 'string' ? draft[key] : ''; input.addEventListener('input', syncDraft); }",
++    "    replanButton?.addEventListener('click', async () => { const comments = collectComments(); if (!comments.length) { setStatus('Add at least one note before requesting a revised plan.', true); return; } setBusy(true); setStatus('Sending revision request...'); try { await send(PLAN_PAGE.replanUrl, { planRevisionID: PLAN_PAGE.planRevisionID, comments }); localStorage.removeItem(PLAN_PAGE.storageKey); for (const input of noteInputs) input.value = ''; setStatus('Revision request sent. OpenCode is drafting a new plan.'); } catch (error) { setStatus(error instanceof Error ? error.message : String(error), true); } finally { setBusy(false); } });",
++    "    proceedButton?.addEventListener('click', async () => { setBusy(true); setStatus('Approving plan and switching to build...'); try { await send(PLAN_PAGE.proceedUrl, { planRevisionID: PLAN_PAGE.planRevisionID }); setStatus('Proceed sent. OpenCode is switching to build mode.'); } catch (error) { setStatus(error instanceof Error ? error.message : String(error), true); } finally { setBusy(false); } });",
++    "  </script>",
 +    "</body>",
 +    "</html>",
 +  ].join("\n")
@@ -377,6 +980,45 @@ index 0000000..7de4856
 +  return createHash("sha256").update(normalizePlanMarkdown(markdown)).digest("hex")
 +}
 +
++export function buildPlanDocument(markdown: string, sourcePath: string): PlanDocument {
++  const parsed = parseSections(markdown)
++  const commentable = new Set(stepSections(parsed.sections).map((section) => section.id))
++  const sections = parsed.sections
++    .filter((section) => !RENDER_OMITTED_TITLES.has(section.title.trim().toLowerCase()))
++    .map<PlanSection>((section) => {
++      const summary = summarizeSection(section)
++      return {
++        level: section.level,
++        title: section.title,
++        id: section.id,
++        body: section.body,
++        bodyHtml: renderMarkdownFragment(section.body),
++        action: extractLabeledValue(section.body, "What") ?? summary.action,
++        why: extractLabeledValue(section.body, "Why") ?? summary.why,
++        filesTests: extractLabeledValue(section.body, "Files/Tests"),
++        commentable: commentable.has(section.id),
++      }
++    })
++  const summaryRows = sections
++    .filter((section) => section.commentable)
++    .map((section) => ({
++      title: section.title,
++      id: section.id,
++      action: section.action ?? section.title,
++      why: section.why ?? "See step details",
++    }))
++
++  return {
++    title: parsed.title === "Plan" ? fallbackTitle(sourcePath) : parsed.title,
++    sourcePath,
++    generatedAt: new Date().toLocaleString(),
++    planRevisionID: planHash(markdown),
++    leadHtml: parsed.lead ? renderMarkdownFragment(parsed.lead) : "",
++    sections,
++    summaryRows,
++  }
++}
++
 +export function shouldAttachPlanHtml(sessionID: SessionID, hash: string, ready: boolean): boolean {
 +  if (!ready) return false
 +  const previous = announcedPlanHashes.get(sessionID)
@@ -385,25 +1027,11 @@ index 0000000..7de4856
 +  return true
 +}
 +
-+export function renderPlanHtml(markdown: string, sourcePath: string): string {
-+  const parsed = parseSections(markdown)
-+  const summaryRows = stepSections(parsed.sections).map((section) => {
-+    const summary = summarizeSection(section)
-+    return {
-+      title: section.title,
-+      id: section.id,
-+      action: summary.action,
-+      why: summary.why,
-+    }
-+  })
-+
-+  return htmlTemplate({
-+    title: parsed.title === "Plan" ? fallbackTitle(sourcePath) : parsed.title,
-+    leadHtml: parsed.lead ? renderMarkdownFragment(parsed.lead) : "",
-+    sections: parsed.sections,
-+    summaryRows,
-+    sourcePath,
-+    generatedAt: new Date().toLocaleString(),
++export function renderPlanHtml(markdown: string, sourcePath: string, options?: { liveUrl?: string }): string {
++  const document = buildPlanDocument(markdown, sourcePath)
++  return snapshotTemplate({
++    document,
++    liveUrl: options?.liveUrl,
 +  })
 +}
 +
@@ -419,20 +1047,20 @@ index 0000000..7de4856
 +  }
 +}
 +
-+async function openHtmlFile(htmlPath: string): Promise<boolean> {
++async function openTarget(target: string): Promise<boolean> {
 +  if (Flag.OPENCODE_DISABLE_PLAN_HTML_AUTO_OPEN || Boolean(process.env["CI"])) return false
 +
 +  if (isWslEnvironment()) {
 +    if (which("wslview")) {
-+      const result = await Process.run(["wslview", htmlPath], { nothrow: true })
++      const result = await Process.run(["wslview", target], { nothrow: true })
 +      if (result.code === 0) return true
 +    }
 +
-+    if (which("wslpath") && which("powershell.exe")) {
-+      const windowsPath = await Process.text(["wslpath", "-w", htmlPath], { nothrow: true })
-+      const target = windowsPath.text.trim()
-+      if (windowsPath.code === 0 && target) {
-+        const command = `Start-Process -FilePath '${target.replace(/'/g, "''")}'`
++    if (!/^https?:\/\//.test(target) && which("wslpath") && which("powershell.exe")) {
++      const windowsPath = await Process.text(["wslpath", "-w", target], { nothrow: true })
++      const windowsTarget = windowsPath.text.trim()
++      if (windowsPath.code === 0 && windowsTarget) {
++        const command = `Start-Process -FilePath '${windowsTarget.replace(/'/g, "''")}'`
 +        const result = await Process.run(["powershell.exe", "-NoProfile", "-Command", command], { nothrow: true })
 +        if (result.code === 0) return true
 +      }
@@ -440,7 +1068,7 @@ index 0000000..7de4856
 +  }
 +
 +  try {
-+    await open(htmlPath)
++    await open(target)
 +    return true
 +  } catch {
 +    return false
@@ -462,24 +1090,26 @@ index 0000000..7de4856
 +  const htmlPath = Session.planHtml(input.session)
 +  const hash = planHash(input.markdown)
 +  const ready = isPlanReadyForOpen(input.markdown)
++  const liveUrl = ready ? getPlanServerUrl(input.session.id) : undefined
 +
 +  if (input.persistMarkdown ?? true) {
 +    await fs.mkdir(path.dirname(markdownPath), { recursive: true })
 +    await fs.writeFile(markdownPath, input.markdown, "utf8")
 +  }
 +
-+  const html = renderPlanHtml(input.markdown, markdownPath)
++  const html = renderPlanHtml(input.markdown, markdownPath, { liveUrl })
 +  await writeHtml(htmlPath, html)
 +
 +  let opened = false
 +  if (input.autoOpen !== false && ready && openedPlanHashes.get(input.session.id) !== hash) {
-+    opened = await openHtmlFile(htmlPath)
++    opened = await openTarget(liveUrl ?? htmlPath)
 +    if (opened) openedPlanHashes.set(input.session.id, hash)
 +  }
 +
 +  return {
 +    markdownPath,
 +    htmlPath,
++    liveUrl,
 +    hash,
 +    ready,
 +    opened,
@@ -497,8 +1127,93 @@ index 0000000..7de4856
 +  })
 +}
 
+diff --git a/packages/opencode/src/session/plan-server.ts b/packages/opencode/src/session/plan-server.ts
+new file mode 100644
+index 000000000..155eca403
+--- /dev/null
++++ b/packages/opencode/src/session/plan-server.ts
+@@ -0,0 +1,78 @@
++import { randomBytes } from "node:crypto"
++import { Hono } from "hono"
++
++import { Instance } from "@/project/instance"
++import { InstanceBootstrap } from "@/project/bootstrap"
++import { setPlanServer } from "./plan-control"
++import { SessionPlanRoutes } from "../server/routes/session-plan"
++
++let server: ReturnType<typeof Bun.serve> | undefined
++let token = ""
++let directory = ""
++
++function nextToken() {
++  return randomBytes(24).toString("hex")
++}
++
++function appForDirectory(targetDirectory: string, currentToken: string) {
++  const routes = new Hono().route("/session", SessionPlanRoutes())
++  const app = new Hono()
++
++  app.use("*", async (c, next) => {
++    const value = c.req.query("token") || c.req.header("x-opencode-plan-token")
++    if (value !== currentToken) {
++      return c.text("Unauthorized", 401)
++    }
++    await next()
++  })
++
++  app.all("*", async (c) => {
++    return Instance.provide({
++      directory: targetDirectory,
++      init: InstanceBootstrap,
++      fn: () => routes.fetch(c.req.raw, c.env),
++    })
++  })
++
++  return app
++}
++
++export const PlanServer = {
++  ensure(input: { directory: string }) {
++    if (server && directory === input.directory) {
++      return {
++        url: server.url.toString(),
++        token,
++      }
++    }
++
++    if (server) {
++      server.stop(true)
++      server = undefined
++    }
++
++    directory = input.directory
++    token = nextToken()
++    const app = appForDirectory(directory, token)
++    server = Bun.serve({
++      hostname: "127.0.0.1",
++      port: 0,
++      idleTimeout: 0,
++      fetch: app.fetch,
++    })
++    setPlanServer({ url: server.url.toString(), token })
++
++    return {
++      url: server.url.toString(),
++      token,
++    }
++  },
++  stop() {
++    setPlanServer(undefined)
++    if (!server) return
++    server.stop(true)
++    server = undefined
++    token = ""
++    directory = ""
++  },
++}
+
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 2482e40..f8f5e53 100644
+index 2482e40fb..f8f5e53e5 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
 @@ -3,6 +3,7 @@ import * as Stream from "effect/Stream"
@@ -556,7 +1271,7 @@ index 2482e40..f8f5e53 100644
          const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
 
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 083c23c..7d0c356 100644
+index 083c23cc6..7d0c35649 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
 @@ -366,6 +366,36 @@ Goal: Write your final plan to the plan file (the only file you can edit).
@@ -598,7 +1313,7 @@ index 083c23c..7d0c356 100644
  This is critical - your turn should only end with either asking the user a question or calling plan_exit. Do not stop unless it's for these 2 reasons.
 
 diff --git a/packages/opencode/src/session/prompt/build-switch.txt b/packages/opencode/src/session/prompt/build-switch.txt
-index 3737b74..85546b1 100644
+index 3737b74d8..85546b176 100644
 --- a/packages/opencode/src/session/prompt/build-switch.txt
 +++ b/packages/opencode/src/session/prompt/build-switch.txt
 @@ -1,5 +1,6 @@
@@ -612,7 +1327,7 @@ index 3737b74..85546b1 100644
  </system-reminder>
 
 diff --git a/packages/opencode/src/session/prompt/plan.txt b/packages/opencode/src/session/prompt/plan.txt
-index 1806e0e..aee87da 100644
+index 1806e0eba..aee87dae2 100644
 --- a/packages/opencode/src/session/prompt/plan.txt
 +++ b/packages/opencode/src/session/prompt/plan.txt
 @@ -23,4 +23,34 @@ Ask the user clarifying questions or ask for their opinion when weighing tradeof
@@ -652,26 +1367,39 @@ index 1806e0e..aee87da 100644
  </system-reminder>
 
 diff --git a/packages/opencode/src/tool/plan.ts b/packages/opencode/src/tool/plan.ts
-index e91bc3f..5245bfe 100644
+index e91bc3faa..e6712fce0 100644
 --- a/packages/opencode/src/tool/plan.ts
 +++ b/packages/opencode/src/tool/plan.ts
-@@ -3,6 +3,7 @@ import path from "path"
+@@ -3,30 +3,40 @@ import path from "path"
  import { Tool } from "./tool"
  import { Question } from "../question"
  import { Session } from "../session"
+-import { MessageV2 } from "../session/message-v2"
+-import { Provider } from "../provider/provider"
++import { approvePlan } from "../session/plan-action"
 +import * as SessionPlanHtml from "../session/plan-html"
- import { MessageV2 } from "../session/message-v2"
- import { Provider } from "../provider/provider"
  import { Instance } from "../project/instance"
-@@ -22,11 +23,29 @@ export const PlanExitTool = Tool.define("plan_exit", {
+-import { type SessionID, MessageID, PartID } from "../session/schema"
+ import EXIT_DESCRIPTION from "./plan-exit.txt"
+ 
+-async function getLastModel(sessionID: SessionID) {
+-  for await (const item of MessageV2.stream(sessionID)) {
+-    if (item.info.role === "user" && item.info.model) return item.info.model
+-  }
+-  return Provider.defaultModel()
+-}
+-
+ export const PlanExitTool = Tool.define("plan_exit", {
+   description: EXIT_DESCRIPTION,
+   parameters: z.object({}),
    async execute(_params, ctx) {
      const session = await Session.get(ctx.sessionID)
      const plan = path.relative(Instance.worktree, Session.plan(session))
-+    let planHtml: string | undefined
++    let planView: string | undefined
 +
 +    try {
 +      const rendered = await SessionPlanHtml.renderExistingPlanArtifacts({ session })
-+      planHtml = path.relative(Instance.worktree, rendered.htmlPath)
++      planView = rendered.liveUrl ?? path.relative(Instance.worktree, rendered.htmlPath)
 +      if (SessionPlanHtml.shouldAttachPlanHtml(ctx.sessionID, rendered.hash, rendered.ready)) {
 +        await Session.updatePart(
 +          SessionPlanHtml.htmlAttachment({
@@ -682,7 +1410,7 @@ index e91bc3f..5245bfe 100644
 +        )
 +      }
 +    } catch {
-+      planHtml = undefined
++      planView = undefined
 +    }
 +
      const answers = await Question.ask({
@@ -690,17 +1418,288 @@ index e91bc3f..5245bfe 100644
        questions: [
          {
 -          question: `Plan at ${plan} is complete. Would you like to switch to the build agent and start implementing?`,
-+          question: `Plan at ${plan} is complete.${planHtml ? ` A rendered HTML view is available at ${planHtml}.` : ""} Would you like to switch to the build agent and start implementing?`,
++          question: `Plan at ${plan} is complete.${planView ? ` A rendered plan view is available at ${planView}.` : ""} Would you like to switch to the build agent and start implementing?`,
            header: "Build Agent",
            custom: false,
            options: [
+@@ -41,27 +51,7 @@ export const PlanExitTool = Tool.define("plan_exit", {
+     const answer = answers[0]?.[0]
+     if (answer === "No") throw new Question.RejectedError()
+ 
+-    const model = await getLastModel(ctx.sessionID)
+-
+-    const userMsg: MessageV2.User = {
+-      id: MessageID.ascending(),
+-      sessionID: ctx.sessionID,
+-      role: "user",
+-      time: {
+-        created: Date.now(),
+-      },
+-      agent: "build",
+-      model,
+-    }
+-    await Session.updateMessage(userMsg)
+-    await Session.updatePart({
+-      id: PartID.ascending(),
+-      messageID: userMsg.id,
+-      sessionID: ctx.sessionID,
+-      type: "text",
+-      text: `The plan at ${plan} has been approved, you can now edit files. Execute the plan`,
+-      synthetic: true,
+-    } satisfies MessageV2.TextPart)
++    await approvePlan(ctx.sessionID)
+ 
+     return {
+       title: "Switching to build agent",
+
+diff --git a/packages/opencode/test/server/session-plan.test.ts b/packages/opencode/test/server/session-plan.test.ts
+new file mode 100644
+index 000000000..f38e7acdf
+--- /dev/null
++++ b/packages/opencode/test/server/session-plan.test.ts
+@@ -0,0 +1,235 @@
++import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
++
++import { Instance } from "../../src/project/instance"
++import { Question } from "../../src/question"
++import { Server } from "../../src/server/server"
++import { Session } from "../../src/session"
++import * as SessionPlanAction from "../../src/session/plan-action"
++import * as SessionPlanHtml from "../../src/session/plan-html"
++import { SessionPrompt } from "../../src/session/prompt"
++import { tmpdir } from "../fixture/fixture"
++
++const SAMPLE_PLAN = `# Goal
++Add an HTML plan artifact that is easy to review in a browser.
++
++# Plan Rationale
++We want a durable plan artifact with rationale and sections.
++
++# Actions
++## Step 1: Analyze the current plan output
++What: Inspect the existing plan prompts and completion flow.
++Why: We need a reliable integration point before generating artifacts.
++Files/Tests: packages/opencode/src/session/prompt.ts, packages/opencode/src/session/processor.ts
++
++## Step 2: Generate the HTML artifact
++What: Render a dedicated HTML file from the final plan content.
++Why: This gives the user a clean browser view with anchors and recap links.
++Files/Tests: packages/opencode/src/session/plan-html.ts, packages/opencode/src/tool/plan.ts
++`
++
++afterEach(async () => {
++  mock.restore()
++  await Instance.disposeAll()
++})
++
++async function waitFor(check: () => boolean, timeoutMs = 500) {
++  const started = Date.now()
++  while (Date.now() - started < timeoutMs) {
++    if (check()) return
++    await new Promise((resolve) => setTimeout(resolve, 10))
++  }
++}
++
++describe("session plan routes", () => {
++  test("renders the live plan page", async () => {
++    await using tmp = await tmpdir({ git: true })
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        await SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })
++        const app = Server.Default()
++
++        const res = await app.request(`/session/${session.id}/plan`, {
++          method: "GET",
++          headers: {
++            "x-opencode-directory": tmp.path,
++          },
++        })
++
++        expect(res.status).toBe(200)
++        const html = await res.text()
++        expect(html).toContain("Propose Revised Plan")
++        expect(html).toContain("Proceed")
++        expect(html).toContain(`data-session-id="${session.id}"`)
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++
++  test("queues replan and answers the pending build question with No", async () => {
++    await using tmp = await tmpdir({ git: true })
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        await SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })
++        const document = SessionPlanHtml.buildPlanDocument(SAMPLE_PLAN, Session.plan(session))
++        const prompt = spyOn(SessionPrompt, "prompt").mockResolvedValue({ info: {} as never, parts: [] })
++        const askPromise = Question.ask({
++          sessionID: session.id,
++          questions: [
++            {
++              question: "Plan complete?",
++              header: "Build Agent",
++              custom: false,
++              options: [
++                { label: "Yes", description: "Proceed to build" },
++                { label: "No", description: "Keep refining" },
++              ],
++            },
++          ],
++        })
++        const app = Server.Default()
++
++        const res = await app.request(`/session/${session.id}/plan/replan`, {
++          method: "POST",
++          headers: {
++            "content-type": "application/json",
++            "x-opencode-directory": tmp.path,
++          },
++          body: JSON.stringify({
++            planRevisionID: document.planRevisionID,
++            comments: [
++              {
++                sectionID: "step-1-analyze-the-current-plan-output",
++                title: "Step 1: Analyze the current plan output",
++                note: "Tighten this step and make the verification more explicit.",
++              },
++            ],
++          }),
++        })
++
++        expect(res.status).toBe(200)
++        await expect(askPromise).resolves.toEqual([["No"]])
++        await waitFor(() => prompt.mock.calls.length > 0)
++        expect(prompt).toHaveBeenCalled()
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++
++  test("proceed answers the pending build question with Yes", async () => {
++    await using tmp = await tmpdir({ git: true })
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        await SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })
++        const document = SessionPlanHtml.buildPlanDocument(SAMPLE_PLAN, Session.plan(session))
++        const askPromise = Question.ask({
++          sessionID: session.id,
++          questions: [
++            {
++              question: "Plan complete?",
++              header: "Build Agent",
++              custom: false,
++              options: [
++                { label: "Yes", description: "Proceed to build" },
++                { label: "No", description: "Keep refining" },
++              ],
++            },
++          ],
++        })
++        const app = Server.Default()
++
++        const res = await app.request(`/session/${session.id}/plan/proceed`, {
++          method: "POST",
++          headers: {
++            "content-type": "application/json",
++            "x-opencode-directory": tmp.path,
++          },
++          body: JSON.stringify({
++            planRevisionID: document.planRevisionID,
++          }),
++        })
++
++        expect(res.status).toBe(200)
++        await expect(askPromise).resolves.toEqual([["Yes"]])
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++
++  test("rejects stale plan revisions", async () => {
++    await using tmp = await tmpdir({ git: true })
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        await SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })
++        const app = Server.Default()
++
++        const res = await app.request(`/session/${session.id}/plan/replan`, {
++          method: "POST",
++          headers: {
++            "content-type": "application/json",
++            "x-opencode-directory": tmp.path,
++          },
++          body: JSON.stringify({
++            planRevisionID: "stale-plan-revision",
++            comments: [
++              {
++                sectionID: "step-1-analyze-the-current-plan-output",
++                title: "Step 1: Analyze the current plan output",
++                note: "Refresh this step.",
++              },
++            ],
++          }),
++        })
++
++        expect(res.status).toBe(409)
++        expect(await res.json()).toEqual(
++          expect.objectContaining({
++            error: "stale_plan_revision",
++          }),
++        )
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++
++  test("falls back to direct approval when no build question is pending", async () => {
++    await using tmp = await tmpdir({ git: true })
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        await SessionPlanHtml.renderPlanArtifacts({ session, markdown: SAMPLE_PLAN, autoOpen: false })
++        const document = SessionPlanHtml.buildPlanDocument(SAMPLE_PLAN, Session.plan(session))
++        const proceed = spyOn(SessionPlanAction, "proceedPlan")
++        const app = Server.Default()
++
++        const res = await app.request(`/session/${session.id}/plan/proceed`, {
++          method: "POST",
++          headers: {
++            "content-type": "application/json",
++            "x-opencode-directory": tmp.path,
++          },
++          body: JSON.stringify({
++            planRevisionID: document.planRevisionID,
++          }),
++        })
++
++        expect(res.status).toBe(200)
++        expect(proceed).toHaveBeenCalledWith(session.id, { planRevisionID: document.planRevisionID })
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++})
 
 diff --git a/packages/opencode/test/session/plan-html.test.ts b/packages/opencode/test/session/plan-html.test.ts
 new file mode 100644
-index 0000000..147189e
+index 000000000..7cbf26b76
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-html.test.ts
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,165 @@
 +import { describe, expect, test } from "bun:test"
 +import fs from "node:fs/promises"
 +import path from "node:path"
@@ -737,6 +1736,20 @@ index 0000000..147189e
 +`
 +
 +describe("session.plan-html", () => {
++  test("builds a plan document with revision metadata and commentable steps", () => {
++    const document = SessionPlanHtml.buildPlanDocument(SAMPLE_PLAN, ".opencode/plans/example.md")
++
++    expect(document.planRevisionID).toHaveLength(64)
++    expect(document.summaryRows).toHaveLength(2)
++    expect(document.sections.some((section) => section.commentable)).toBe(true)
++    expect(document.sections.find((section) => section.id === "step-1-analyze-the-current-plan-output")?.action).toBe(
++      "Inspect the existing plan prompts and completion flow.",
++    )
++    expect(document.sections.find((section) => section.id === "step-2-generate-the-html-artifact")?.filesTests).toBe(
++      "packages/opencode/src/session/plan-html.ts, packages/opencode/src/tool/plan.ts",
++    )
++  })
++
 +  test("renders sections and a final summary table", () => {
 +    const html = SessionPlanHtml.renderPlanHtml(SAMPLE_PLAN, ".opencode/plans/example.md")
 +
@@ -748,6 +1761,25 @@ index 0000000..147189e
 +    expect(html).toContain("<strong>plan artifact</strong>")
 +    expect(html).toContain('href="https://example.com/summary"')
 +    expect(html).toContain("This gives the user a clean browser view with anchors and recap links.")
++  })
++
++  test("renders an interactive plan page with comment inputs and actions", () => {
++    const document = SessionPlanHtml.buildPlanDocument(SAMPLE_PLAN, ".opencode/plans/example.md")
++    const html = SessionPlanHtml.renderInteractivePlanHtml({
++      document,
++      sessionID: SessionID.make("session_plan_html"),
++      replanUrl: "/session/session_plan_html/plan/replan",
++      proceedUrl: "/session/session_plan_html/plan/proceed",
++      token: "plan-token",
++    })
++
++    expect(html).toContain("Propose Revised Plan")
++    expect(html).toContain("Proceed")
++    expect(html).toContain('data-session-id="session_plan_html"')
++    expect(html).toContain(`data-plan-revision-id="${document.planRevisionID}"`)
++    expect(html).toContain('data-section-id="step-1-analyze-the-current-plan-output"')
++    expect(html).toContain("Save notes for this step")
++    expect(html).toContain("plan-token")
 +  })
 +
 +  test("filters synthetic reminders and extracts markdown text", () => {

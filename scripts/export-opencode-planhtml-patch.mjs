@@ -20,14 +20,21 @@ const MANIFEST_FILE = path.join(PATCH_DIR, "manifest.json")
 const PATCHED_FILES = [
   "packages/opencode/package.json",
   "packages/opencode/src/agent/agent.ts",
+  "packages/opencode/src/cli/cmd/tui/worker.ts",
   "packages/opencode/src/flag/flag.ts",
+  "packages/opencode/src/server/instance.ts",
+  "packages/opencode/src/server/routes/session-plan.ts",
   "packages/opencode/src/session/index.ts",
+  "packages/opencode/src/session/plan-action.ts",
+  "packages/opencode/src/session/plan-control.ts",
   "packages/opencode/src/session/plan-html.ts",
+  "packages/opencode/src/session/plan-server.ts",
   "packages/opencode/src/session/processor.ts",
   "packages/opencode/src/session/prompt.ts",
   "packages/opencode/src/session/prompt/build-switch.txt",
   "packages/opencode/src/session/prompt/plan.txt",
   "packages/opencode/src/tool/plan.ts",
+  "packages/opencode/test/server/session-plan.test.ts",
   "packages/opencode/test/session/plan-html.test.ts",
 ]
 
