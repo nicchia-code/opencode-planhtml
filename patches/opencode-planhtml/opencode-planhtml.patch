@@ -2375,7 +2375,7 @@ index 000000000..acadf85cc
 
 diff --git a/packages/opencode/src/session/plan-server.ts b/packages/opencode/src/session/plan-server.ts
 new file mode 100644
-index 000000000..3afbe370a
+index 000000000..82e97392d
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-server.ts
 @@ -0,0 +1,92 @@
@@ -2418,7 +2418,7 @@ index 000000000..3afbe370a
 +    }
 +
 +    const response = await routes.fetch(new Request(url, c.req.raw), c.env)
-+    if (cookie) return response
++    if (cookie === currentToken) return response
 +
 +    const headers = new Headers(response.headers)
 +    setPlanCookieHeader(headers, currentToken)
@@ -3738,10 +3738,10 @@ index 000000000..d50fe1385
 
 diff --git a/packages/opencode/test/session/plan-html.test.ts b/packages/opencode/test/session/plan-html.test.ts
 new file mode 100644
-index 000000000..20aedec1e
+index 000000000..784aaf3ab
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-html.test.ts
-@@ -0,0 +1,327 @@
+@@ -0,0 +1,366 @@
 +import { afterEach, describe, expect, spyOn, test } from "bun:test"
 +import fs from "node:fs/promises"
 +import path from "node:path"
@@ -4039,6 +4039,45 @@ index 000000000..20aedec1e
 +            sourcePath: Session.planUser(session),
 +          }),
 +        )
++
++        await Session.remove(session.id)
++      },
++    })
++  })
++
++  test("refreshes stale auth cookies before loading the review app bundle", async () => {
++    await using tmp = await tmpdir({ git: true })
++
++    await Instance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await Session.create({})
++        const artifacts = await SessionPlanHtml.renderPlanArtifacts({
++          session,
++          markdown: SAMPLE_PLAN,
++          userMarkdown: SAMPLE_USER_PLAN,
++          autoOpen: false,
++        })
++
++        const page = await fetch(artifacts.liveUrl!, {
++          headers: {
++            cookie: "opencode-plan-token=stale-token",
++          },
++        })
++        const cookie = page.headers.get("set-cookie")
++        const cookieHeader = cookie?.split(";", 1)[0]
++        const html = await page.text()
++        const bundlePath = html.match(/src="([^"]*\/assets\/[^"]+\.js)"/)?.[1]
++
++        expect(page.status).toBe(200)
++        expect(cookie).toContain("opencode-plan-token=")
++        expect(cookieHeader).not.toBe("opencode-plan-token=stale-token")
++        expect(bundlePath).toBeTruthy()
++
++        const bundle = await fetch(new URL(bundlePath!, artifacts.liveUrl!), {
++          headers: { cookie: cookieHeader! },
++        })
++        expect(bundle.status).toBe(200)
 +
 +        await Session.remove(session.id)
 +      },
