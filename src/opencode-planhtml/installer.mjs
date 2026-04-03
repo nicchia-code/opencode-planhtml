@@ -258,7 +258,7 @@ async function install(options) {
 
   await ensureCleanSourceDir(sourceDir, repo, ref)
   await applyPatch(sourceDir, patchFile)
-  await run("bun", ["install"], { cwd: sourceDir })
+  await run("bun", ["install", "--frozen-lockfile"], { cwd: sourceDir })
   await run("bun", ["run", "script/build.ts", "--single"], { cwd: path.join(sourceDir, manifest.packageDir) })
 
   if (!(await fileExists(binaryPath))) {

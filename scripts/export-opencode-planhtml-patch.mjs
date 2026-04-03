@@ -18,6 +18,7 @@ const PATCH_FILE = path.join(PATCH_DIR, "opencode-planhtml.patch")
 const MANIFEST_FILE = path.join(PATCH_DIR, "manifest.json")
 
 const PATCHED_FILES = [
+  "bun.lock",
   "packages/app/src/app.tsx",
   "packages/app/src/context/plan-comments.test.ts",
   "packages/app/src/context/plan-comments.ts",

@@ -4,6 +4,7 @@
   "patchFile": "patches/opencode-planhtml/opencode-planhtml.patch",
   "packageDir": "packages/opencode",
   "files": [
+    "bun.lock",
     "packages/app/src/app.tsx",
     "packages/app/src/context/plan-comments.test.ts",
     "packages/app/src/context/plan-comments.ts",
@@ -35,5 +36,5 @@
     "packages/opencode/test/session/plan-html.test.ts",
     "packages/opencode/test/session/plan-user.test.ts"
   ],
-  "generatedAt": "2026-04-03T09:16:02.579Z"
+  "generatedAt": "2026-04-03T09:33:56.561Z"
 }
