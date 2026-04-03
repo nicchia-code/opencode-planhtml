@@ -160,6 +160,33 @@ async function gitOutput(args, cwd) {
   })
 }
 
+export async function removeNestedNodeModules(rootDir) {
+  async function walk(directory) {
+    let entries
+    try {
+      entries = await fs.readdir(directory, { withFileTypes: true })
+    } catch (error) {
+      if (error && error.code === "ENOENT") return
+      throw error
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+
+      const entryPath = path.join(directory, entry.name)
+      if (entry.name === "node_modules") {
+        await fs.rm(entryPath, { recursive: true, force: true })
+        continue
+      }
+
+      if (entry.name === ".git") continue
+      await walk(entryPath)
+    }
+  }
+
+  await walk(rootDir)
+}
+
 async function ensureCleanSourceDir(sourceDir, repo, ref) {
   if (!(await fileExists(path.join(sourceDir, ".git")))) {
     await fs.rm(sourceDir, { recursive: true, force: true })
@@ -170,6 +197,7 @@ async function ensureCleanSourceDir(sourceDir, repo, ref) {
   await run("git", ["fetch", "--all", "--tags", "--prune"], { cwd: sourceDir })
   await run("git", ["reset", "--hard", ref], { cwd: sourceDir })
   await run("git", ["clean", "-fd"], { cwd: sourceDir })
+  await removeNestedNodeModules(sourceDir)
 }
 
 async function applyPatch(sourceDir, patchFile) {

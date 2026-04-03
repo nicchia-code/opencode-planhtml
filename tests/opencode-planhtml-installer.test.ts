@@ -1,9 +1,11 @@
 import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { describe, expect, it } from "vitest"
 
-import { builtBinaryRelativePath, defaultPaths, parseCliArgs } from "../src/opencode-planhtml/installer.mjs"
+import { builtBinaryRelativePath, defaultPaths, parseCliArgs, removeNestedNodeModules } from "../src/opencode-planhtml/installer.mjs"
 
 const manifestPath = fileURLToPath(new URL("../patches/opencode-planhtml/manifest.json", import.meta.url))
 const patchPath = fileURLToPath(new URL("../patches/opencode-planhtml/opencode-planhtml.patch", import.meta.url))
@@ -66,5 +68,31 @@ describe("opencode plan HTML installer helpers", () => {
 
     expect(processorSection).toContain("Effect.catch(")
     expect(processorSection).not.toContain("Effect.catchAll(")
+  })
+
+  it("removes stale node_modules trees before reinstalling", async () => {
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-planhtml-node-modules-"))
+
+    try {
+      const rootNodeModules = path.join(tempRoot, "node_modules")
+      const nestedNodeModules = path.join(tempRoot, "packages", "opencode", "node_modules")
+      const deepNestedNodeModules = path.join(tempRoot, "packages", "sdk", "js", "node_modules")
+      const keepDir = path.join(tempRoot, "packages", "opencode", "src")
+
+      await fs.mkdir(path.join(rootNodeModules, ".bun"), { recursive: true })
+      await fs.mkdir(path.join(nestedNodeModules, "@anthropic-ai", "sdk"), { recursive: true })
+      await fs.mkdir(path.join(deepNestedNodeModules, ".bin"), { recursive: true })
+      await fs.mkdir(keepDir, { recursive: true })
+      await fs.writeFile(path.join(keepDir, "index.ts"), "export const ok = true\n", "utf8")
+
+      await removeNestedNodeModules(tempRoot)
+
+      await expect(fs.access(rootNodeModules)).rejects.toMatchObject({ code: "ENOENT" })
+      await expect(fs.access(nestedNodeModules)).rejects.toMatchObject({ code: "ENOENT" })
+      await expect(fs.access(deepNestedNodeModules)).rejects.toMatchObject({ code: "ENOENT" })
+      await expect(fs.readFile(path.join(keepDir, "index.ts"), "utf8")).resolves.toBe("export const ok = true\n")
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true })
+    }
   })
 })
