@@ -2589,10 +2589,10 @@ index 000000000..29b491a68
 
 diff --git a/packages/opencode/src/session/plan-html.ts b/packages/opencode/src/session/plan-html.ts
 new file mode 100644
-index 000000000..acadf85cc
+index 000000000..7275bbbcb
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-html.ts
-@@ -0,0 +1,705 @@
+@@ -0,0 +1,714 @@
 +import fs from "node:fs/promises"
 +import { createHash } from "node:crypto"
 +import { release } from "node:os"
@@ -3071,6 +3071,15 @@ index 000000000..acadf85cc
 +    .filter(Boolean)
 +    .join("\n\n")
 +    .trim()
++}
++
++export function selectPlanMarkdownForArtifacts(input: { assistantMarkdown?: string; persistedMarkdown?: string }) {
++  const assistantMarkdown = normalizePlanMarkdown(input.assistantMarkdown ?? "").trim()
++  const persistedMarkdown = normalizePlanMarkdown(input.persistedMarkdown ?? "").trim()
++
++  if (isPlanReadyForOpen(assistantMarkdown)) return assistantMarkdown
++  if (isPlanReadyForOpen(persistedMarkdown)) return persistedMarkdown
++  return assistantMarkdown || persistedMarkdown
 +}
 +
 +export function isPlanReadyForOpen(markdown: string): boolean {
@@ -4192,10 +4201,13 @@ index 000000000..d5e2f94b5
 +}
 
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 2482e40fb..387592542 100644
+index 2482e40fb..fbd8fe3f8 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -3,6 +3,7 @@ import * as Stream from "effect/Stream"
+@@ -1,8 +1,10 @@
++import fs from "node:fs/promises"
+ import { Cause, Effect, Layer, ServiceMap } from "effect"
+ import * as Stream from "effect/Stream"
  import { Agent } from "@/agent/agent"
  import { Bus } from "@/bus"
  import { Config } from "@/config/config"
@@ -4203,7 +4215,7 @@ index 2482e40fb..387592542 100644
  import { Permission } from "@/permission"
  import { Plugin } from "@/plugin"
  import { Snapshot } from "@/snapshot"
-@@ -11,6 +12,7 @@ import { Session } from "."
+@@ -11,6 +13,7 @@ import { Session } from "."
  import { LLM } from "./llm"
  import { MessageV2 } from "./message-v2"
  import { isOverflow } from "./overflow"
@@ -4211,7 +4223,7 @@ index 2482e40fb..387592542 100644
  import { PartID } from "./schema"
  import type { SessionID } from "./schema"
  import { SessionRetry } from "./retry"
-@@ -407,6 +409,41 @@ export namespace SessionProcessor {
+@@ -407,6 +410,51 @@ export namespace SessionProcessor {
            }
            ctx.assistantMessage.time.completed = Date.now()
            yield* session.updateMessage(ctx.assistantMessage)
@@ -4222,9 +4234,19 @@ index 2482e40fb..387592542 100644
 +            !ctx.assistantMessage.error
 +          ) {
 +            yield* Effect.gen(function* () {
-+              const markdown = SessionPlanHtml.markdownFromParts(parts)
-+              if (!markdown) return
++              const assistantMarkdown = SessionPlanHtml.markdownFromParts(parts)
 +              const info = yield* session.get(ctx.sessionID)
++              let persistedMarkdown: string | undefined
++              try {
++                persistedMarkdown = yield* Effect.tryPromise(() => fs.readFile(Session.plan(info), "utf8"))
++              } catch (error) {
++                if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw error
++              }
++              const markdown = SessionPlanHtml.selectPlanMarkdownForArtifacts({
++                assistantMarkdown,
++                persistedMarkdown,
++              })
++              if (!markdown) return
 +              const artifacts = yield* Effect.tryPromise(() =>
 +                SessionPlanHtml.renderPlanArtifacts({
 +                  session: info,
@@ -4255,7 +4277,7 @@ index 2482e40fb..387592542 100644
          const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
 
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 083c23cc6..e7e2f4ff6 100644
+index 083c23cc6..d0c275659 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
 @@ -18,6 +18,7 @@ import { SystemPrompt } from "./system"
@@ -4311,7 +4333,7 @@ index 083c23cc6..e7e2f4ff6 100644
  
  ## Plan Workflow
  
-@@ -359,15 +374,54 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
+@@ -359,15 +374,56 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
  2. Ensure that the plans align with the user's original request
  3. Use question tool to clarify any remaining questions with the user
  
@@ -4355,12 +4377,14 @@ index 083c23cc6..e7e2f4ff6 100644
 +- use \`## Step N: ...\` for each major step
 +- in every major step include explicit \`What:\`, \`Why:\`, and \`Files/Tests:\` lines before the detailed bullets
 +- keep the internal markdown concise enough that downstream tooling can still derive a rendered summary from it
++- your FINAL visible assistant response in plan mode must contain ONLY this internal markdown plan, because the runtime persists that visible response as the technical plan file
 +
 +Structure the USER-FACING plan at ${planUser} like this:
 +- start with the exact delimiter line \`=== USER PLAN ===\`
 +- after that delimiter, write XML only
 +- do NOT start the user-facing file with markdown headings like \`# Goal\`; those headings belong to the internal markdown plan only
 +- make the XML mirror the same recommended approach as the internal plan, but in a reviewer-friendly structure
++- write the user-facing XML only to ${planUser}; do NOT paste the XML into your final visible assistant response
 +
 +If the task is too small to require full TDD, say so explicitly and provide the lightest valid plan instead of forcing ceremony.
  
@@ -4386,10 +4410,10 @@ index 3737b74d8..85546b176 100644
  </system-reminder>
 
 diff --git a/packages/opencode/src/session/prompt/plan.txt b/packages/opencode/src/session/prompt/plan.txt
-index 1806e0eba..1b4d0dce2 100644
+index 1806e0eba..42b1964d9 100644
 --- a/packages/opencode/src/session/prompt/plan.txt
 +++ b/packages/opencode/src/session/prompt/plan.txt
-@@ -23,4 +23,38 @@ Ask the user clarifying questions or ask for their opinion when weighing tradeof
+@@ -23,4 +23,40 @@ Ask the user clarifying questions or ask for their opinion when weighing tradeof
  ## Important
  
  The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
@@ -4420,21 +4444,23 @@ index 1806e0eba..1b4d0dce2 100644
 +- then `# Actions`
 +- use `## Step N: ...` for each major step
 +- in every major step include explicit `What:`, `Why:`, and `Files/Tests:` lines before the detailed bullets
++- your FINAL visible assistant response in plan mode must contain only this internal markdown plan
 +
 +Structure the USER-FACING plan like this:
 +- start with the exact delimiter line `=== USER PLAN ===`
 +- after that delimiter, write XML only
 +- do NOT start the user-facing file with markdown headings like `# Goal`; those headings belong to the internal markdown plan only
++- write the user-facing XML only to the user-facing plan file, not in the visible assistant response
 +
 +If the task is too small to require full TDD, say so explicitly and provide the lightest valid plan instead of forcing ceremony.
  </system-reminder>
 
 diff --git a/packages/opencode/src/session/prompt/plan-user.txt b/packages/opencode/src/session/prompt/plan-user.txt
 new file mode 100644
-index 000000000..72b6c2850
+index 000000000..0d463a9d0
 --- /dev/null
 +++ b/packages/opencode/src/session/prompt/plan-user.txt
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,52 @@
 +<system-reminder>
 +## User-Facing Plan File
 +
@@ -4485,13 +4511,14 @@ index 000000000..72b6c2850
 +- Keep the XML valid and complete after every rewrite.
 +- Do not include internal-plan-only content before or after the XML payload.
 +- If another instruction mentions markdown headings like `# Goal`, interpret that as guidance for the INTERNAL plan only, not for this user-facing XML file.
++- Do not emit this XML as the final visible assistant response; write it only into the dedicated user-facing plan file.
 +</system-reminder>
 
 diff --git a/packages/opencode/src/tool/plan.ts b/packages/opencode/src/tool/plan.ts
-index e91bc3faa..da893036a 100644
+index e91bc3faa..2d252c893 100644
 --- a/packages/opencode/src/tool/plan.ts
 +++ b/packages/opencode/src/tool/plan.ts
-@@ -3,30 +3,41 @@ import path from "path"
+@@ -3,30 +3,44 @@ import path from "path"
  import { Tool } from "./tool"
  import { Question } from "../question"
  import { Session } from "../session"
@@ -4520,6 +4547,9 @@ index e91bc3faa..da893036a 100644
 +
 +    try {
 +      const rendered = await SessionPlanHtml.renderExistingPlanArtifacts({ session })
++      if (!rendered.ready) {
++        throw new Error("The internal plan is not ready yet. Finalize the technical markdown plan before calling plan_exit.")
++      }
 +      planView = rendered.liveUrl ?? path.relative(Instance.worktree, rendered.htmlPath)
 +      if (SessionPlanHtml.shouldAttachPlanHtml(ctx.sessionID, rendered.hash, rendered.ready)) {
 +        await Session.updatePart(
@@ -4544,7 +4574,7 @@ index e91bc3faa..da893036a 100644
            header: "Build Agent",
            custom: false,
            options: [
-@@ -41,27 +52,7 @@ export const PlanExitTool = Tool.define("plan_exit", {
+@@ -41,27 +55,7 @@ export const PlanExitTool = Tool.define("plan_exit", {
      const answer = answers[0]?.[0]
      if (answer === "No") throw new Question.RejectedError()
  
@@ -5136,10 +5166,10 @@ index 000000000..3d47cd253
 
 diff --git a/packages/opencode/test/session/plan-html.test.ts b/packages/opencode/test/session/plan-html.test.ts
 new file mode 100644
-index 000000000..142c917fa
+index 000000000..431730c90
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-html.test.ts
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,376 @@
 +import { afterEach, describe, expect, spyOn, test } from "bun:test"
 +import fs from "node:fs/promises"
 +import path from "node:path"
@@ -5281,6 +5311,15 @@ index 000000000..142c917fa
 +
 +    expect(SessionPlanHtml.hasTodoWriteCompletion(parts)).toBe(true)
 +    expect(SessionPlanHtml.markdownFromParts(parts)).toBe("# Goal\nPlan content")
++  })
++
++  test("prefers a persisted ready internal plan over a non-ready visible response", () => {
++    const selected = SessionPlanHtml.selectPlanMarkdownForArtifacts({
++      assistantMarkdown: `${SessionPlanUser.USER_PLAN_DELIMITER}\n<user_plan></user_plan>`,
++      persistedMarkdown: SAMPLE_PLAN,
++    })
++
++    expect(selected).toBe(SAMPLE_PLAN)
 +  })
 +
 +  test("opens only for plans with final structure and dedupes attachments per version", () => {
