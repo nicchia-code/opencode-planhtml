@@ -565,10 +565,10 @@ index b5a96110f..d419d7aeb 100644
 
 diff --git a/packages/app/src/pages/session-plan-types.ts b/packages/app/src/pages/session-plan-types.ts
 new file mode 100644
-index 000000000..19c96ad0f
+index 000000000..808d31ab5
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan-types.ts
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,91 @@
 +export type PlanUserSection = {
 +  id: string
 +  title: string
@@ -603,6 +603,31 @@ index 000000000..19c96ad0f
 +  commentable: boolean
 +}
 +
++export type PlanUserFieldTextRow = {
++  id: string
++  label: "what" | "why"
++  kind: "text"
++  text: string
++  commentable: boolean
++}
++
++export type PlanUserFieldListRow = {
++  id: string
++  label: "files_tests"
++  kind: "list"
++  items: PlanUserListItem[]
++  commentable: boolean
++}
++
++export type PlanUserFieldRow = PlanUserFieldTextRow | PlanUserFieldListRow
++
++export type PlanUserFieldTableNode = {
++  id: string
++  kind: "field-table"
++  rows: PlanUserFieldRow[]
++  commentable: boolean
++}
++
 +export type PlanUserToggleNode = {
 +  id: string
 +  kind: "toggle"
@@ -623,6 +648,7 @@ index 000000000..19c96ad0f
 +  | PlanUserHeadingNode
 +  | PlanUserParagraphNode
 +  | PlanUserListNode
++  | PlanUserFieldTableNode
 +  | PlanUserToggleNode
 +  | PlanUserNoteNode
 +
@@ -637,10 +663,10 @@ index 000000000..19c96ad0f
 
 diff --git a/packages/app/src/pages/session-plan.test.tsx b/packages/app/src/pages/session-plan.test.tsx
 new file mode 100644
-index 000000000..8cb5bdcc3
+index 000000000..6995b9e3f
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.test.tsx
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,235 @@
 +import { beforeAll, describe, expect, mock, test } from "bun:test"
 +import fs from "node:fs"
 +
@@ -833,7 +859,8 @@ index 000000000..8cb5bdcc3
 +  test("groups What/Why/Files rows into a review table and renders actual list bullets", () => {
 +    const source = fs.readFileSync(new URL("./session-plan.tsx", import.meta.url), "utf8")
 +
-+    expect(source).toContain("function FieldTable")
++    expect(source).toContain("function XmlFieldTable")
++    expect(source).toContain('props.node.kind === "field-table"')
 +    expect(source).toContain("parseReviewField(node.text)")
 +    expect(source).toContain('"Files / Tests"')
 +    expect(source).toContain('list-outside list-disc')
@@ -878,10 +905,10 @@ index 000000000..8cb5bdcc3
 
 diff --git a/packages/app/src/pages/session-plan.tsx b/packages/app/src/pages/session-plan.tsx
 new file mode 100644
-index 000000000..93ecf1c04
+index 000000000..90a091737
 --- /dev/null
 +++ b/packages/app/src/pages/session-plan.tsx
-@@ -0,0 +1,840 @@
+@@ -0,0 +1,899 @@
 +import { Button } from "@opencode-ai/ui/button"
 +import { Spinner } from "@opencode-ai/ui/spinner"
 +import { showToast } from "@opencode-ai/ui/toast"
@@ -894,6 +921,8 @@ index 000000000..93ecf1c04
 +import { decode64 } from "@/utils/base64"
 +import type {
 +  PlanUserDocument,
++  PlanUserFieldRow,
++  PlanUserFieldTableNode,
 +  PlanUserHeadingNode,
 +  PlanUserListNode,
 +  PlanUserNode,
@@ -1242,7 +1271,62 @@ index 000000000..93ecf1c04
 +  )
 +}
 +
-+function FieldTable(props: { nodes: PlanUserParagraphNode[]; comments: Accessor<PlanComment[]> }) {
++function fieldRowLabel(row: PlanUserFieldRow | ReviewFieldLabel) {
++  if (typeof row === "string") {
++    return row === "files/tests" ? "Files / Tests" : row[0].toUpperCase() + row.slice(1)
++  }
++  return row.label === "files_tests" ? "Files / Tests" : row.label[0].toUpperCase() + row.label.slice(1)
++}
++
++function XmlFieldTable(props: { node: PlanUserFieldTableNode; comments: Accessor<PlanComment[]> }) {
++  return (
++    <div class="overflow-hidden rounded-2xl border border-[rgba(55,53,47,0.08)] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
++      <table class="w-full border-collapse text-left">
++        <tbody>
++          <For each={props.node.rows}>
++            {(row, index) => {
++              const nodeComments = createMemo(() => props.comments().filter((comment) => comment.anchor.nodeID === row.id))
++              return (
++                <tr classList={{ "border-t border-[rgba(55,53,47,0.08)]": index() > 0 }}>
++                  <th class="w-[170px] align-top bg-[rgba(55,53,47,0.03)] px-4 py-3 text-[12px] font-semibold uppercase tracking-[0.08em] text-[#787774]">
++                    {fieldRowLabel(row)}
++                  </th>
++                  <td class="px-4 py-3 text-[15px] leading-7 text-[#37352f]">
++                    <Show
++                      when={row.kind === "text"}
++                      fallback={
++                        <ul class="list-outside list-disc pl-6 space-y-2 marker:text-[#2f76d2]">
++                          <For each={row.kind === "list" ? row.items : []}>
++                            {(item) => {
++                              const itemComments = createMemo(() => props.comments().filter((comment) => comment.anchor.nodeID === item.id))
++                              return (
++                                <li>
++                                  <span data-plan-node-id={item.id} data-plan-node-text="true" class="select-text">
++                                    <TextWithHighlights text={item.text} comments={itemComments()} />
++                                  </span>
++                                </li>
++                              )
++                            }}
++                          </For>
++                        </ul>
++                      }
++                    >
++                      <span data-plan-node-id={row.id} data-plan-node-text="true" class="select-text">
++                        <TextWithHighlights text={row.kind === "text" ? row.text : ""} comments={nodeComments()} />
++                      </span>
++                    </Show>
++                  </td>
++                </tr>
++              )
++            }}
++          </For>
++        </tbody>
++      </table>
++    </div>
++  )
++}
++
++function LegacyFieldTable(props: { nodes: PlanUserParagraphNode[]; comments: Accessor<PlanComment[]> }) {
 +  return (
 +    <div class="overflow-hidden rounded-2xl border border-[rgba(55,53,47,0.08)] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
 +      <table class="w-full border-collapse text-left">
@@ -1251,11 +1335,10 @@ index 000000000..93ecf1c04
 +            {(node, index) => {
 +              const field = parseReviewField(node.text)!
 +              const nodeComments = createMemo(() => props.comments().filter((comment) => comment.anchor.nodeID === node.id))
-+              const label = field.label === "files/tests" ? "Files / Tests" : field.label[0].toUpperCase() + field.label.slice(1)
 +              return (
 +                <tr classList={{ "border-t border-[rgba(55,53,47,0.08)]": index() > 0 }}>
 +                  <th class="w-[170px] align-top bg-[rgba(55,53,47,0.03)] px-4 py-3 text-[12px] font-semibold uppercase tracking-[0.08em] text-[#787774]">
-+                    {label}
++                    {fieldRowLabel(field.label)}
 +                  </th>
 +                  <td class="px-4 py-3 text-[15px] leading-7 text-[#37352f]">
 +                    <span data-plan-node-id={node.id} data-plan-node-text="true" class="select-text">
@@ -1326,6 +1409,9 @@ index 000000000..93ecf1c04
 +      <Match when={props.node.kind === "list"}>
 +        <ListNode node={props.node as PlanUserListNode} comments={props.comments} onCommentNode={props.onCommentNode} />
 +      </Match>
++      <Match when={props.node.kind === "field-table"}>
++        <XmlFieldTable node={props.node as PlanUserFieldTableNode} comments={props.comments} />
++      </Match>
 +      <Match when={props.node.kind === "toggle"}>
 +        <ToggleNode node={props.node as PlanUserToggleNode} comments={props.comments} onCommentNode={props.onCommentNode} />
 +      </Match>
@@ -1342,7 +1428,7 @@ index 000000000..93ecf1c04
 +    <div class="space-y-4">
 +      <For each={groups()}>
 +        {(group) =>
-+          group.kind === "fields" ? <FieldTable nodes={group.nodes} comments={props.comments} /> : <PlanNodeView node={group.node} comments={props.comments} onCommentNode={props.onCommentNode} />
++          group.kind === "fields" ? <LegacyFieldTable nodes={group.nodes} comments={props.comments} /> : <PlanNodeView node={group.node} comments={props.comments} onCommentNode={props.onCommentNode} />
 +        }
 +      </For>
 +    </div>
@@ -1724,10 +1810,18 @@ index 000000000..93ecf1c04
 +}
 
 diff --git a/packages/opencode/package.json b/packages/opencode/package.json
-index d97046ca9..98af15e98 100644
+index d97046ca9..4047fdeff 100644
 --- a/packages/opencode/package.json
 +++ b/packages/opencode/package.json
-@@ -130,6 +130,7 @@
+@@ -121,6 +121,7 @@
+     "diff": "catalog:",
+     "drizzle-orm": "catalog:",
+     "effect": "catalog:",
++    "fast-xml-parser": "5.5.10",
+     "fuzzysort": "3.1.0",
+     "gitlab-ai-provider": "6.0.0",
+     "glob": "13.0.5",
+@@ -130,6 +131,7 @@
      "hono-openapi": "catalog:",
      "ignore": "7.0.5",
      "jsonc-parser": "3.3.1",
@@ -2074,10 +2168,10 @@ index 5ed5acafa..5885faf4a 100644
 
 diff --git a/packages/opencode/src/session/plan-action.ts b/packages/opencode/src/session/plan-action.ts
 new file mode 100644
-index 000000000..1a5c944cf
+index 000000000..7eec6096b
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-action.ts
-@@ -0,0 +1,363 @@
+@@ -0,0 +1,375 @@
 +import fs from "node:fs/promises"
 +import path from "node:path"
 +import { setTimeout as sleep } from "node:timers/promises"
@@ -2267,9 +2361,21 @@ index 000000000..1a5c944cf
 +    "",
 +    "",
 +    "The user-facing plan must still follow:",
-+    "# Goal",
-+    "# Piano Razionale",
-+    "plus structured headings, paragraphs, and special blocks like :::toggle[Title] ... ::: when they help readability.",
++    "=== USER PLAN ===",
++    "<user_plan>",
++    "  <title>...</title>",
++    "  <goal><p>...</p></goal>",
++    "  <rationale><p>...</p></rationale>",
++    "  <steps>",
++    "    <step>",
++    "      <title>...</title>",
++    "      <what>...</what>",
++    "      <why>...</why>",
++    "      <files_tests><item>...</item></files_tests>",
++    "      <details><item>...</item></details>",
++    "    </step>",
++    "  </steps>",
++    "</user_plan>",
 +    "",
 +    "Requested revisions:",
 +  ]
@@ -3294,12 +3400,13 @@ index 000000000..82e97392d
 
 diff --git a/packages/opencode/src/session/plan-user.ts b/packages/opencode/src/session/plan-user.ts
 new file mode 100644
-index 000000000..76b8ee46c
+index 000000000..d5e2f94b5
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-user.ts
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,786 @@
 +import { createHash } from "node:crypto"
 +import path from "node:path"
++import { XMLParser } from "fast-xml-parser"
 +
 +export type PlanUserSection = {
 +  id: string
@@ -3334,6 +3441,29 @@ index 000000000..76b8ee46c
 +  items: PlanUserListItem[]
 +}
 +
++export type PlanUserFieldTextRow = {
++  id: string
++  label: "what" | "why"
++  kind: "text"
++  text: string
++  commentable: boolean
++}
++
++export type PlanUserFieldListRow = {
++  id: string
++  label: "files_tests"
++  kind: "list"
++  items: PlanUserListItem[]
++  commentable: boolean
++}
++
++export type PlanUserFieldRow = PlanUserFieldTextRow | PlanUserFieldListRow
++
++export type PlanUserFieldTableNode = PlanUserNodeBase & {
++  kind: "field-table"
++  rows: PlanUserFieldRow[]
++}
++
 +export type PlanUserToggleNode = PlanUserNodeBase & {
 +  kind: "toggle"
 +  title: string
@@ -3350,6 +3480,7 @@ index 000000000..76b8ee46c
 +  | PlanUserHeadingNode
 +  | PlanUserParagraphNode
 +  | PlanUserListNode
++  | PlanUserFieldTableNode
 +  | PlanUserToggleNode
 +  | PlanUserNoteNode
 +
@@ -3364,7 +3495,7 @@ index 000000000..76b8ee46c
 +
 +export type PlanUserTarget = {
 +  id: string
-+  kind: PlanUserNode["kind"] | "list-item"
++  kind: PlanUserNode["kind"] | "list-item" | "field-row"
 +  text: string
 +}
 +
@@ -3376,7 +3507,16 @@ index 000000000..76b8ee46c
 +  /\bas\s+above\b/i,
 +]
 +
-+export const USER_PLAN_DELIMITER = "===PIANO UTENTE==="
++export const USER_PLAN_DELIMITER = "=== USER PLAN ==="
++const LEGACY_USER_PLAN_DELIMITER = "===PIANO UTENTE==="
++
++const xmlParser = new XMLParser({
++  ignoreAttributes: false,
++  attributeNamePrefix: "",
++  textNodeName: "#text",
++  trimValues: false,
++  parseTagValue: false,
++})
 +
 +function escapeHtml(value: string): string {
 +  return value
@@ -3413,17 +3553,72 @@ index 000000000..76b8ee46c
 +  return markdown.trim()
 +}
 +
-+export function sanitizeUserPlanMarkdown(markdown: string) {
++function isolateUserPlanContent(markdown: string) {
 +  const normalized = normalize(markdown)
-+  const markerIndex = normalized.indexOf(USER_PLAN_DELIMITER)
-+  const isolated = markerIndex >= 0 ? normalized.slice(markerIndex + USER_PLAN_DELIMITER.length) : normalized
++  for (const delimiter of [USER_PLAN_DELIMITER, LEGACY_USER_PLAN_DELIMITER]) {
++    const markerIndex = normalized.indexOf(delimiter)
++    if (markerIndex >= 0) {
++      return normalized.slice(markerIndex + delimiter.length).trim()
++    }
++  }
++  return normalized
++}
 +
-+  return isolated
++export function sanitizeUserPlanMarkdown(markdown: string) {
++  return isolateUserPlanContent(markdown)
 +    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "")
 +    .split(/\r?\n/)
 +    .join("\n")
 +    .replace(/\n{3,}/g, "\n\n")
 +    .trim()
++}
++
++function escapeXml(value: string): string {
++  return value
++    .replace(/&/g, "&amp;")
++    .replace(/</g, "&lt;")
++    .replace(/>/g, "&gt;")
++    .replace(/"/g, "&quot;")
++    .replace(/'/g, "&apos;")
++}
++
++function asArray<T>(value: T | T[] | undefined): T[] {
++  if (value === undefined) return []
++  return Array.isArray(value) ? value : [value]
++}
++
++function readXmlText(value: unknown): string {
++  if (typeof value === "string") return value.trim()
++  if (Array.isArray(value)) return value.map(readXmlText).filter(Boolean).join(" ").trim()
++  if (value && typeof value === "object") {
++    const record = value as Record<string, unknown>
++    const text = record["#text"]
++    if (typeof text === "string") return text.trim()
++  }
++  return ""
++}
++
++function readXmlParagraphs(value: unknown): string[] {
++  if (!value || typeof value !== "object") {
++    const text = readXmlText(value)
++    return text ? [text] : []
++  }
++
++  const record = value as Record<string, unknown>
++  const paragraphs = asArray(record.p).map(readXmlText).filter(Boolean)
++  if (paragraphs.length) return paragraphs
++  const text = readXmlText(record)
++  return text ? [text] : []
++}
++
++function readXmlItems(value: unknown): string[] {
++  if (!value || typeof value !== "object") return []
++  const record = value as Record<string, unknown>
++  return asArray(record.item).map(readXmlText).filter(Boolean)
++}
++
++function looksLikeXml(value: string) {
++  return /^<\?xml\b|^<user_plan\b/i.test(value.trim())
 +}
 +
 +function hash(markdown: string) {
@@ -3433,6 +3628,268 @@ index 000000000..76b8ee46c
 +function fallbackTitle(sourcePath: string) {
 +  const base = path.basename(sourcePath, path.extname(sourcePath)).replace(/\.user$/, "")
 +  return base.replace(/[-_]+/g, " ").trim() || "User plan"
++}
++
++type InternalSection = {
++  level: number
++  title: string
++  body: string
++}
++
++function parseInternalSections(markdown: string) {
++  const lines = markdown.split(/\r?\n/)
++  const sections: InternalSection[] = []
++  let current: InternalSection | undefined
++
++  const pushCurrent = () => {
++    if (!current) return
++    current.body = current.body.trim()
++    sections.push(current)
++    current = undefined
++  }
++
++  for (const line of lines) {
++    const heading = line.match(/^(#{1,6})\s+(.+)$/)
++    if (heading) {
++      pushCurrent()
++      current = {
++        level: heading[1].length,
++        title: heading[2].trim(),
++        body: "",
++      }
++      continue
++    }
++
++    if (current) current.body += `${line}\n`
++  }
++
++  pushCurrent()
++  return sections
++}
++
++function stripMarkdown(value: string) {
++  return value
++    .replace(/`([^`]+)`/g, "$1")
++    .replace(/\*\*([^*]+)\*\*/g, "$1")
++    .replace(/__([^_]+)__/g, "$1")
++    .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
++    .replace(/^#+\s+/gm, "")
++    .trim()
++}
++
++function extractLabeledValue(body: string, label: string) {
++  const match = body.match(new RegExp(`^${label}:\\s*(.+)$`, "im"))
++  return match?.[1]?.trim() ? stripMarkdown(match[1].trim()) : undefined
++}
++
++function internalParagraphs(value: string) {
++  return value
++    .split(/\n\s*\n/g)
++    .map((part) => part.trim())
++    .filter(Boolean)
++    .map((part) => stripMarkdown(part))
++}
++
++function parseFilesTestsItems(value?: string) {
++  if (!value) return []
++  return value
++    .split(/\s*,\s*/)
++    .map((item) => item.trim())
++    .filter(Boolean)
++}
++
++function parseDetailItems(body: string) {
++  return body
++    .split(/\r?\n/)
++    .map((line) => line.trim())
++    .filter((line) => /^[-*]\s+/.test(line) || /^\d+\.\s+/.test(line))
++    .map((line) => line.replace(/^[-*]\s+/, "").replace(/^\d+\.\s+/, "").trim())
++    .map(stripMarkdown)
++    .filter(Boolean)
++}
++
++function buildXmlFieldRow(label: "what" | "why", text: string, seen: Map<string, number>): PlanUserFieldTextRow {
++  return {
++    id: uniqueId(`${label}-${text}`, seen),
++    label,
++    kind: "text",
++    text,
++    commentable: true,
++  }
++}
++
++function buildXmlListItems(prefix: string, items: string[], seen: Map<string, number>) {
++  return items.map((item) => ({
++    id: uniqueId(`${prefix}-${item}`, seen),
++    text: item,
++    commentable: true,
++  }))
++}
++
++function buildXmlDocument(markdown: string, sourcePath: string): PlanUserDocument {
++  const parsed = xmlParser.parse(markdown)
++  const root = parsed?.user_plan
++  if (!root || typeof root !== "object") {
++    throw new Error("User plan XML must contain a <user_plan> root element")
++  }
++
++  const record = root as Record<string, unknown>
++  const seen = new Map<string, number>()
++  const nodes: PlanUserNode[] = []
++
++  const pushParagraphSection = (headingText: string, source: unknown) => {
++    const id = uniqueId(headingText, seen)
++    nodes.push({
++      id,
++      kind: "heading",
++      level: 1,
++      text: headingText,
++      commentable: true,
++    })
++
++    for (const paragraph of readXmlParagraphs(source)) {
++      nodes.push({
++        id: uniqueId(`${headingText}-${paragraph}`, seen),
++        kind: "paragraph",
++        text: paragraph,
++        commentable: true,
++      })
++    }
++  }
++
++  pushParagraphSection("Goal", record.goal)
++  pushParagraphSection("Piano Razionale", record.rationale)
++
++  const steps = record.steps && typeof record.steps === "object" ? asArray((record.steps as Record<string, unknown>).step) : []
++  for (const step of steps) {
++    if (!step || typeof step !== "object") continue
++    const stepRecord = step as Record<string, unknown>
++    const title = readXmlText(stepRecord.title)
++    if (!title) continue
++
++    nodes.push({
++      id: uniqueId(title, seen),
++      kind: "heading",
++      level: 2,
++      text: title,
++      commentable: true,
++    })
++
++    const rows: PlanUserFieldRow[] = []
++    const what = readXmlText(stepRecord.what)
++    const why = readXmlText(stepRecord.why)
++    const filesTests = readXmlItems(stepRecord.files_tests)
++    if (what) rows.push(buildXmlFieldRow("what", what, seen))
++    if (why) rows.push(buildXmlFieldRow("why", why, seen))
++    if (filesTests.length) {
++      rows.push({
++        id: uniqueId(`${title}-files-tests`, seen),
++        label: "files_tests",
++        kind: "list",
++        items: buildXmlListItems(`${title}-files-tests-item`, filesTests, seen),
++        commentable: true,
++      })
++    }
++    if (rows.length) {
++      nodes.push({
++        id: uniqueId(`${title}-fields`, seen),
++        kind: "field-table",
++        rows,
++        commentable: false,
++      })
++    }
++
++    const detailItems = readXmlItems(stepRecord.details)
++    if (detailItems.length) {
++      nodes.push({
++        id: uniqueId(`${title}-details`, seen),
++        kind: "list",
++        ordered: false,
++        items: buildXmlListItems(`${title}-detail`, detailItems, seen),
++        commentable: true,
++      })
++    }
++  }
++
++  const sections = gatherSections(nodes)
++  const title = readXmlText(record.title) || resolveTitle(nodes, sourcePath)
++  const sectionTitles = new Set(sections.map((section) => section.title.toLowerCase()))
++  if (!sectionTitles.has("goal") || !sectionTitles.has("piano razionale")) {
++    throw new Error("User plan XML must include <goal> and <rationale> sections")
++  }
++
++  return {
++    title,
++    sourcePath,
++    generatedAt: new Date().toLocaleString(),
++    planRevisionID: hash(markdown),
++    sections,
++    nodes,
++  }
++}
++
++function renderXmlSection(tag: string, paragraphs: string[]) {
++  const body = paragraphs.map((paragraph) => `    <p>${escapeXml(paragraph)}</p>`).join("\n")
++  return [`  <${tag}>`, body || "    <p></p>", `  </${tag}>`].join("\n")
++}
++
++function renderXmlList(tag: string, items: string[]) {
++  if (!items.length) return ""
++  return [
++    `      <${tag}>`,
++    ...items.map((item) => `        <item>${escapeXml(item)}</item>`),
++    `      </${tag}>`,
++  ].join("\n")
++}
++
++function deriveXmlUserPlan(markdown: string) {
++  const sections = parseInternalSections(sanitizeUserPlanMarkdown(markdown))
++  const goalSection = sections.find((section) => section.title.toLowerCase() === "goal")
++  const rationaleSection = sections.find((section) => ["plan rationale", "piano razionale"].includes(section.title.toLowerCase()))
++  const stepSections = sections.filter((section) => section.level === 2 && /^(step|phase)\b/i.test(section.title))
++
++  const goalParagraphs = internalParagraphs(goalSection?.body ?? "Review the current plan.")
++  const rationaleParagraphs = internalParagraphs(rationaleSection?.body ?? "This review plan mirrors the current internal plan so it can be reviewed clearly.")
++  const title = goalParagraphs[0] || "User plan"
++
++  const steps = stepSections.length
++    ? stepSections
++    : [
++        {
++          level: 2,
++          title: "Review the current work",
++          body: sections.map((section) => `${section.title}\n\n${section.body}`.trim()).join("\n\n"),
++        },
++      ]
++
++  return [
++    USER_PLAN_DELIMITER,
++    "",
++    `<user_plan>`,
++    `  <title>${escapeXml(title)}</title>`,
++    renderXmlSection("goal", goalParagraphs.length ? goalParagraphs : ["Review the current plan."]),
++    renderXmlSection("rationale", rationaleParagraphs.length ? rationaleParagraphs : ["Explain the reasoning behind the implementation plan."]),
++    `  <steps>`,
++    ...steps.flatMap((section) => {
++      const what = extractLabeledValue(section.body, "What") ?? internalParagraphs(section.body)[0] ?? section.title
++      const why = extractLabeledValue(section.body, "Why") ?? internalParagraphs(section.body)[1] ?? "Explain why this step matters."
++      const filesTests = parseFilesTestsItems(extractLabeledValue(section.body, "Files/Tests"))
++      const details = parseDetailItems(section.body)
++      return [
++        `    <step>`,
++        `      <title>${escapeXml(section.title)}</title>`,
++        `      <what>${escapeXml(what)}</what>`,
++        `      <why>${escapeXml(why)}</why>`,
++        ...(filesTests.length ? [renderXmlList("files_tests", filesTests)] : []),
++        ...(details.length ? [renderXmlList("details", details)] : []),
++        `    </step>`,
++      ]
++    }),
++    `  </steps>`,
++    `</user_plan>`,
++  ]
++    .filter(Boolean)
++    .join("\n")
 +}
 +
 +function parseList(lines: string[], index: number, seen: Map<string, number>) {
@@ -3598,34 +4055,13 @@ index 000000000..76b8ee46c
 +}
 +
 +export function deriveUserPlanMarkdown(markdown: string) {
-+  let result = sanitizeUserPlanMarkdown(markdown)
-+  if (!result) return result
-+
-+  result = result.replace(/^#\s+Plan Rationale\b/im, "# Piano Razionale")
-+
-+  if (!/^#\s+Goal\b/im.test(result)) {
-+    result = `# Goal\n\nReview the current plan.\n\n${result}`
-+  }
-+
-+  if (!/^#\s+Piano Razionale\b/im.test(result)) {
-+    const rationale =
-+      "# Piano Razionale\n\nThis review plan mirrors the current internal plan so it can be reviewed and commented on in one place."
-+    const actions = result.match(/^#\s+Actions\b/im)
-+
-+    if (actions?.index !== undefined) {
-+      result = `${result.slice(0, actions.index).trim()}\n\n${rationale}\n\n${result.slice(actions.index).trim()}`
-+    } else {
-+      result = `${result}\n\n${rationale}`
-+    }
-+  }
-+
-+  const finalized = sanitizeUserPlanMarkdown(result)
-+  return `${USER_PLAN_DELIMITER}\n\n${finalized}`
++  return deriveXmlUserPlan(markdown)
 +}
 +
 +export function buildPlanUserDocument(markdown: string, sourcePath: string): PlanUserDocument {
 +  const sanitized = sanitizeUserPlanMarkdown(markdown)
 +  assertSelfContainedPlan(sanitized)
++  if (looksLikeXml(sanitized)) return buildXmlDocument(sanitized, sourcePath)
 +  const nodes = parseNodes(sanitized)
 +  const sections = gatherSections(nodes)
 +  const sectionTitles = new Set(sections.map((section) => section.title.toLowerCase()))
@@ -3655,6 +4091,21 @@ index 000000000..76b8ee46c
 +      const tag = node.ordered ? "ol" : "ul"
 +      return `<${tag} data-plan-node-id="${node.id}">${node.items.map((item) => `<li data-plan-node-id="${item.id}">${renderInline(item.text)}</li>`).join("")}</${tag}>`
 +    }
++    case "field-table":
++      return [
++        '<table class="plan-user-field-table">',
++        '<tbody>',
++        ...node.rows.map((row) => {
++          const label = row.label === "files_tests" ? "Files / Tests" : row.label[0].toUpperCase() + row.label.slice(1)
++          const value =
++            row.kind === "list"
++              ? `<ul>${row.items.map((item) => `<li data-plan-node-id="${item.id}">${renderInline(item.text)}</li>`).join("")}</ul>`
++              : `<span data-plan-node-id="${row.id}">${renderInline(row.text)}</span>`
++          return `<tr><th>${label}</th><td>${value}</td></tr>`
++        }),
++        '</tbody>',
++        '</table>',
++      ].join("")
 +    case "toggle":
 +      return `<details data-plan-node-id="${node.id}"><summary>${renderInline(node.title)}</summary>${node.children.map(renderNode).join("")}</details>`
 +    case "note":
@@ -3679,6 +4130,10 @@ index 000000000..76b8ee46c
 +    "    details { margin: 16px 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; }",
 +    "    summary { cursor: pointer; text-decoration: underline; text-underline-offset: 0.2em; }",
 +    "    code { background: rgba(127,127,127,0.12); padding: 0.15rem 0.35rem; border-radius: 6px; }",
++    "    .plan-user-field-table { width: 100%; border-collapse: collapse; margin: 18px 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }",
++    "    .plan-user-field-table th, .plan-user-field-table td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }",
++    "    .plan-user-field-table th { width: 180px; text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.78rem; color: var(--muted); background: rgba(127,127,127,0.08); }",
++    "    .plan-user-field-table tr:last-child th, .plan-user-field-table tr:last-child td { border-bottom: none; }",
 +    "    .plan-user-note { margin: 16px 0; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--note); }",
 +    "  </style>",
 +    "</head>",
@@ -3707,6 +4162,16 @@ index 000000000..76b8ee46c
 +      case "note":
 +        out.push({ id: node.id, kind: node.kind, text: node.title })
 +        walkTargets(node.children, out)
++        break
++      case "field-table":
++        for (const row of node.rows) {
++          if (row.kind === "list") {
++            out.push({ id: row.id, kind: "field-row", text: row.items.map((item) => item.text).join("\n") })
++            for (const item of row.items) out.push({ id: item.id, kind: "list-item", text: item.text })
++          } else {
++            out.push({ id: row.id, kind: "field-row", text: row.text })
++          }
++        }
 +        break
 +      case "list":
 +        out.push({ id: node.id, kind: node.kind, text: node.items.map((item) => item.text).join("\n") })
@@ -3790,7 +4255,7 @@ index 2482e40fb..387592542 100644
          const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
 
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 083c23cc6..7454093ca 100644
+index 083c23cc6..e16f43a13 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
 @@ -18,6 +18,7 @@ import { SystemPrompt } from "./system"
@@ -3841,7 +4306,7 @@ index 083c23cc6..7454093ca 100644
 +${userExists ? `A user-facing plan file already exists at ${planUser}. You can read it and make incremental edits using the edit tool.` : `No user-facing plan file exists yet. You should create it at ${planUser} using the write tool.`}
 +You must keep BOTH plan files updated together. The internal plan is for execution. The user-facing plan is for human review.
 +Both plans must be complete and self-contained after every update. Never refer to a previous plan version, unchanged sections elsewhere, or earlier drafts.
-+The user-facing plan must contain the exact delimiter line ===PIANO UTENTE=== immediately before the user-facing content begins.
++The user-facing plan must contain the exact delimiter line === USER PLAN === immediately before the XML user-facing content begins.
 +NOTE that these are the only files you are allowed to edit - other than these you are only allowed to take READ-ONLY actions.
  
  ## Plan Workflow
@@ -3858,7 +4323,7 @@ index 083c23cc6..7454093ca 100644
 -- Ensure that the plan file is concise enough to scan quickly, but detailed enough to execute effectively
 +- Ensure that the internal plan is concise enough to scan quickly, but detailed enough to execute effectively
 +- Ensure that the user-facing plan is easier to read, more explanatory, and suitable for interactive review
-+- Ensure that the user-facing plan contains the exact delimiter line ===PIANO UTENTE=== immediately before \`# Goal\`
++- Ensure that the user-facing plan contains the exact delimiter line === USER PLAN === immediately before the XML payload
  - Include the paths of critical files to be modified
  - Include a verification section describing how to test the changes end-to-end (run the code, use MCP tools, run tests)
 +- Make sure both plan files are fully self-contained after every rewrite
@@ -3956,48 +4421,59 @@ index 1806e0eba..aee87dae2 100644
 
 diff --git a/packages/opencode/src/session/prompt/plan-user.txt b/packages/opencode/src/session/prompt/plan-user.txt
 new file mode 100644
-index 000000000..b1a407fe1
+index 000000000..7a121be8c
 --- /dev/null
 +++ b/packages/opencode/src/session/prompt/plan-user.txt
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,50 @@
 +<system-reminder>
 +## User-Facing Plan File
 +
-+In addition to the internal execution plan, you must maintain a second markdown file for the user-facing review experience.
++In addition to the internal execution plan, you must maintain a second file for the user-facing review experience.
 +
-+This user-facing plan MUST:
++The user-facing plan MUST:
 +- be fully self-contained
 +- never refer to a previous plan, an earlier version, or unchanged sections elsewhere
 +- explain the work in clear user-oriented language
-+- remain structured and scannable
-+- include the exact delimiter `===PIANO UTENTE===` on its own line before any user-facing content
++- use the exact delimiter `=== USER PLAN ===` on its own line before the XML payload
++- use XML, not freeform markdown, for the user-facing structure
 +
-+The user-facing plan MUST start with:
-+- `===PIANO UTENTE===`
-+- `# Goal`
-+- `# Piano Razionale`
++The user-facing plan MUST start exactly like this:
 +
-+Then continue with clear structured sections that explain what will happen and why.
-+
-+You may use this special syntax for interactive disclosures:
-+
-+```md
-+:::toggle[Editero questi file]
-+- `src/example.ts`
-+- `src/other.ts`
-+:::
-+
-+:::note[Dettaglio tecnico]
-+Spiega qui un dettaglio secondario.
-+:::
++```text
++=== USER PLAN ===
++<user_plan>
++  <title>Short human-readable title</title>
++  <goal>
++    <p>Explain the goal in reviewer-friendly language.</p>
++  </goal>
++  <rationale>
++    <p>Explain the rationale in reviewer-friendly language.</p>
++  </rationale>
++  <steps>
++    <step>
++      <title>Short step title</title>
++      <what>What will happen in this step.</what>
++      <why>Why this step matters.</why>
++      <files_tests>
++        <item>src/example.ts</item>
++        <item>src/other.ts</item>
++      </files_tests>
++      <details>
++        <item>Important reviewer-visible detail.</item>
++        <item>Another important detail.</item>
++      </details>
++    </step>
++  </steps>
++</user_plan>
 +```
 +
-+Guidelines for the user-facing plan:
-+- Write for a human reviewer, not for the model runtime.
-+- Keep the text discursive but precise.
-+- Put secondary implementation details in `:::toggle[...]` or `:::note[...]` blocks.
-+- Use toggles for file lists, tests, risks, or implementation details when that improves readability.
-+- Make each regenerated version complete on its own.
++Rules for this XML:
++- Use `<goal><p>...</p></goal>` and `<rationale><p>...</p></rationale>`.
++- Every `<step>` must contain `<title>`, `<what>`, and `<why>`.
++- Use `<files_tests><item>...</item></files_tests>` for files or tests when relevant.
++- Use `<details><item>...</item></details>` for bullet-style supporting details when relevant.
++- Keep the XML valid and complete after every rewrite.
++- Do not include internal-plan-only content before or after the XML payload.
 +</system-reminder>
 
 diff --git a/packages/opencode/src/tool/plan.ts b/packages/opencode/src/tool/plan.ts
@@ -4089,7 +4565,7 @@ index e91bc3faa..da893036a 100644
 
 diff --git a/packages/opencode/test/server/session-plan.test.ts b/packages/opencode/test/server/session-plan.test.ts
 new file mode 100644
-index 000000000..05cad4653
+index 000000000..3d47cd253
 --- /dev/null
 +++ b/packages/opencode/test/server/session-plan.test.ts
 @@ -0,0 +1,553 @@
@@ -4262,11 +4738,11 @@ index 000000000..05cad4653
 +        expect(res.status).toBe(200)
 +        expect(await res.json()).toEqual(
 +          expect.objectContaining({
-+            markdown: expect.stringContaining("# Piano Razionale"),
++            markdown: expect.stringContaining(SessionPlanUser.USER_PLAN_DELIMITER),
 +            sourcePath: Session.planUser(session),
 +          }),
 +        )
-+        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain("# Piano Razionale")
++        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain(SessionPlanUser.USER_PLAN_DELIMITER)
 +
 +        await Session.remove(session.id)
 +      },
@@ -4369,13 +4845,13 @@ index 000000000..05cad4653
 +        expect(res.status).toBe(200)
 +        expect(await res.json()).toEqual(
 +          expect.objectContaining({
-+            markdown: expect.stringContaining("# Piano Razionale"),
++            markdown: expect.stringContaining(SessionPlanUser.USER_PLAN_DELIMITER),
 +            document: expect.objectContaining({
 +              title: "Add an HTML plan artifact that is easy to review in a browser.",
 +            }),
 +          }),
 +        )
-+        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain("refresh flow")
++        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain("<user_plan>")
 +
 +        await Session.remove(session.id)
 +      },
@@ -4470,7 +4946,7 @@ index 000000000..05cad4653
 +        })
 +
 +        expect(res.status).toBe(200)
-+        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain("# Piano Razionale")
++        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain(SessionPlanUser.USER_PLAN_DELIMITER)
 +
 +        await Session.remove(session.id)
 +      },
@@ -4605,7 +5081,7 @@ index 000000000..05cad4653
 +
 +        expect(res.status).toBe(200)
 +        await expect(askPromise).resolves.toEqual([["Yes"]])
-+        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain("# Piano Razionale")
++        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain(SessionPlanUser.USER_PLAN_DELIMITER)
 +
 +        await Session.remove(session.id)
 +      },
@@ -4649,10 +5125,10 @@ index 000000000..05cad4653
 
 diff --git a/packages/opencode/test/session/plan-html.test.ts b/packages/opencode/test/session/plan-html.test.ts
 new file mode 100644
-index 000000000..784aaf3ab
+index 000000000..142c917fa
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-html.test.ts
-@@ -0,0 +1,366 @@
+@@ -0,0 +1,367 @@
 +import { afterEach, describe, expect, spyOn, test } from "bun:test"
 +import fs from "node:fs/promises"
 +import path from "node:path"
@@ -4661,6 +5137,7 @@ index 000000000..784aaf3ab
 +import * as SessionPlanHtml from "../../src/session/plan-html"
 +import { getPlanServerDirectory } from "../../src/session/plan-control"
 +import { PlanServer } from "../../src/session/plan-server"
++import * as SessionPlanUser from "../../src/session/plan-user"
 +import { MessageV2 } from "../../src/session/message-v2"
 +import { MessageID, PartID, SessionID } from "../../src/session/schema"
 +import { Instance } from "../../src/project/instance"
@@ -4855,7 +5332,7 @@ index 000000000..784aaf3ab
 +        })
 +
 +        expect(await fs.readFile(Session.plan(session), "utf8")).toBe(SAMPLE_PLAN)
-+        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain("# Piano Razionale")
++        expect(await fs.readFile(Session.planUser(session), "utf8")).toContain(SessionPlanUser.USER_PLAN_DELIMITER)
 +        expect(artifacts.htmlPath).toBe(Session.planUserHtml(session))
 +        expect(artifacts.liveUrl).toBeTruthy()
 +
@@ -5022,10 +5499,10 @@ index 000000000..784aaf3ab
 
 diff --git a/packages/opencode/test/session/plan-user.test.ts b/packages/opencode/test/session/plan-user.test.ts
 new file mode 100644
-index 000000000..9bd1362d7
+index 000000000..9e3dab1c1
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-user.test.ts
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,147 @@
 +import { describe, expect, test } from "bun:test"
 +
 +import { Instance } from "../../src/project/instance"
@@ -5055,6 +5532,33 @@ index 000000000..9bd1362d7
 +:::
 +`
 +
++const SAMPLE_XML_USER_PLAN = `${SessionPlanUser.USER_PLAN_DELIMITER}
++
++<user_plan>
++  <title>Implement a richer plan review flow</title>
++  <goal>
++    <p>Explain the user-facing goal clearly.</p>
++  </goal>
++  <rationale>
++    <p>Keep the review readable and structured.</p>
++  </rationale>
++  <steps>
++    <step>
++      <title>Inspect the current plan output</title>
++      <what>Review the existing user-facing rendering.</what>
++      <why>We need a deterministic XML shape for What and Why.</why>
++      <files_tests>
++        <item>packages/opencode/src/session/plan-user.ts</item>
++        <item>packages/app/src/pages/session-plan.tsx</item>
++      </files_tests>
++      <details>
++        <item>Replace heuristic parsing with XML parsing.</item>
++      </details>
++    </step>
++  </steps>
++</user_plan>
++`
++
 +describe("session.plan-user", () => {
 +  test("builds a structured user plan document with toggle and note nodes", () => {
 +    const document = SessionPlanUser.buildPlanUserDocument(SAMPLE_USER_PLAN, ".opencode/plans/example.user.md")
@@ -5080,6 +5584,15 @@ index 000000000..9bd1362d7
 +    expect(html).toContain("packages/app/src/pages/session-plan.tsx")
 +  })
 +
++  test("builds a structured user plan document from XML after the fixed delimiter", () => {
++    const document = SessionPlanUser.buildPlanUserDocument(SAMPLE_XML_USER_PLAN, ".opencode/plans/example.user.md")
++
++    expect(document.title).toBe("Implement a richer plan review flow")
++    expect(document.sections.map((section) => section.title)).toEqual(["Goal", "Piano Razionale", "Inspect the current plan output"])
++    expect(document.nodes.some((node) => node.kind === "field-table")).toBe(true)
++    expect(SessionPlanUser.flattenPlanUserTargets(document).some((target) => target.kind === "field-row")).toBe(true)
++  })
++
 +  test("rejects plans that refer to a previous version", () => {
 +    expect(() =>
 +      SessionPlanUser.assertSelfContainedPlan(`# Goal\nSame as the previous plan, with one extra note.`),
@@ -5090,10 +5603,11 @@ index 000000000..9bd1362d7
 +    const derived = SessionPlanUser.deriveUserPlanMarkdown(`# Goal\n\nShip the fix.\n\n# Plan Rationale\n\nKeep the change small.\n\n# Actions\n\n## Step 1\nDo it.`)
 +
 +    expect(derived).toContain(SessionPlanUser.USER_PLAN_DELIMITER)
-+    expect(derived).toContain("# Goal")
-+    expect(derived).toContain("# Piano Razionale")
-+    expect(derived).not.toContain("# Plan Rationale")
-+    expect(derived).toContain("# Actions")
++    expect(derived).toContain("<user_plan>")
++    expect(derived).toContain("<goal>")
++    expect(derived).toContain("<rationale>")
++    expect(derived).toContain("<what>")
++    expect(derived).toContain("<why>")
 +    expect(() => SessionPlanUser.buildPlanUserDocument(derived, ".opencode/plans/example.user.md")).not.toThrow()
 +  })
 +
@@ -5108,9 +5622,9 @@ index 000000000..9bd1362d7
 +  })
 +
 +  test("isolates the user-facing section after the fixed delimiter", () => {
-+    const sanitized = SessionPlanUser.sanitizeUserPlanMarkdown(`# Goal\n\nInternal details here.\n\n${SessionPlanUser.USER_PLAN_DELIMITER}\n\n# Goal\n\nVisible user plan.\n\n# Piano Razionale\n\nReadable summary.`)
++    const sanitized = SessionPlanUser.sanitizeUserPlanMarkdown(`# Goal\n\nInternal details here.\n\n${SessionPlanUser.USER_PLAN_DELIMITER}\n\n<user_plan><goal><p>Visible user plan.</p></goal><rationale><p>Readable summary.</p></rationale><steps /></user_plan>`)
 +
-+    expect(sanitized).toBe(`# Goal\n\nVisible user plan.\n\n# Piano Razionale\n\nReadable summary.`)
++    expect(sanitized).toBe(`<user_plan><goal><p>Visible user plan.</p></goal><rationale><p>Readable summary.</p></rationale><steps /></user_plan>`)
 +  })
 +
 +  test("renders markdown bold in the fallback html snapshot", () => {
