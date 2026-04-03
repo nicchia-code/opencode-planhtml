@@ -2198,7 +2198,7 @@ index 5ed5acafa..5885faf4a 100644
 
 diff --git a/packages/opencode/src/session/plan-action.ts b/packages/opencode/src/session/plan-action.ts
 new file mode 100644
-index 000000000..d9d986a98
+index 000000000..fbb3feb63
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-action.ts
 @@ -0,0 +1,360 @@
@@ -2389,8 +2389,8 @@ index 000000000..d9d986a98
 +    "Why:",
 +    "Files/Tests:",
 +    "",
-+    "After updating the internal plan, call the task tool with subagent_type `plan_user` so the dedicated subagent can regenerate the user-facing XML review file.",
-+    "Do not paste the XML into your visible assistant response.",
++    "After updating the internal plan, the runtime will automatically regenerate the user-facing XML review file through the dedicated plan_user subagent.",
++    "Do not paste the XML into your visible assistant response and do not call the task tool yourself for this.",
 +    "",
 +    "Requested revisions:",
 +  ]
@@ -4216,11 +4216,12 @@ index 000000000..d5e2f94b5
 +}
 
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 2482e40fb..fbd8fe3f8 100644
+index 2482e40fb..4b0f32bbf 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -1,8 +1,10 @@
+@@ -1,8 +1,11 @@
 +import fs from "node:fs/promises"
++import path from "node:path"
  import { Cause, Effect, Layer, ServiceMap } from "effect"
  import * as Stream from "effect/Stream"
  import { Agent } from "@/agent/agent"
@@ -4230,15 +4231,76 @@ index 2482e40fb..fbd8fe3f8 100644
  import { Permission } from "@/permission"
  import { Plugin } from "@/plugin"
  import { Snapshot } from "@/snapshot"
-@@ -11,6 +13,7 @@ import { Session } from "."
+@@ -11,6 +14,8 @@ import { Session } from "."
  import { LLM } from "./llm"
  import { MessageV2 } from "./message-v2"
  import { isOverflow } from "./overflow"
 +import * as SessionPlanHtml from "./plan-html"
++import * as SessionPlanUser from "./plan-user"
  import { PartID } from "./schema"
  import type { SessionID } from "./schema"
  import { SessionRetry } from "./retry"
-@@ -407,6 +410,51 @@ export namespace SessionProcessor {
+@@ -98,6 +103,59 @@ export namespace SessionProcessor {
+         }
+         let aborted = false
+ 
++        const generateUserFacingPlan = Effect.fn("SessionProcessor.generateUserFacingPlan")(function* (sessionInfo: Session.Info, markdown: string) {
++          if (!SessionPlanHtml.isPlanReadyForOpen(markdown)) return undefined
++
++          const planPath = Session.plan(sessionInfo)
++          const planUserPath = Session.planUser(sessionInfo)
++          yield* Effect.tryPromise(() => fs.mkdir(path.dirname(planPath), { recursive: true }))
++          yield* Effect.tryPromise(() => fs.writeFile(planPath, markdown, "utf8"))
++
++          const planUserAgent = yield* agents.get("plan_user")
++          if (!planUserAgent) return undefined
++
++          const child = yield* Effect.tryPromise(() =>
++            Session.create({
++              parentID: ctx.sessionID,
++              title: `Generate user plan (@${planUserAgent.name} subagent)`,
++            }),
++          )
++
++          const promptText = [
++            `Read the internal technical plan at ${planPath}.`,
++            `Generate or update the user-facing review plan at ${planUserPath}.`,
++            `Do not modify ${planPath}; only update ${planUserPath}.`,
++            `The user-facing file must start with the exact delimiter line ${SessionPlanUser.USER_PLAN_DELIMITER}.`,
++            `After that delimiter, write XML only.`,
++            `When you are done, reply with a short status sentence only.`,
++          ].join("\n")
++
++          const promptModule = yield* Effect.promise(() => import("./prompt"))
++          yield* Effect.tryPromise(() =>
++            promptModule.SessionPrompt.prompt({
++              sessionID: child.id,
++              agent: planUserAgent.name,
++              model: {
++                providerID: ctx.model.providerID,
++                modelID: ctx.model.id,
++              },
++              parts: [
++                {
++                  type: "text",
++                  text: promptText,
++                },
++              ],
++            }),
++          )
++
++          return yield* Effect.tryPromise(() => fs.readFile(planUserPath, "utf8")).pipe(
++            Effect.catchIf(
++              (error) => (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT",
++              () => Effect.succeed(undefined),
++            ),
++          )
++        })
++
+         const parse = (e: unknown) =>
+           MessageV2.fromError(e, {
+             providerID: input.model.providerID,
+@@ -407,6 +465,61 @@ export namespace SessionProcessor {
            }
            ctx.assistantMessage.time.completed = Date.now()
            yield* session.updateMessage(ctx.assistantMessage)
@@ -4262,10 +4324,20 @@ index 2482e40fb..fbd8fe3f8 100644
 +                persistedMarkdown,
 +              })
 +              if (!markdown) return
++              const userMarkdown = yield* generateUserFacingPlan(info, markdown).pipe(
++                Effect.catchAll((error) => {
++                  log.error("plan_user subagent failed", {
++                    sessionID: ctx.sessionID,
++                    error: error instanceof Error ? error.message : String(error),
++                  })
++                  return Effect.succeed(undefined)
++                }),
++              )
 +              const artifacts = yield* Effect.tryPromise(() =>
 +                SessionPlanHtml.renderPlanArtifacts({
 +                  session: info,
 +                  markdown,
++                  userMarkdown,
 +                }),
 +              )
 +              if (SessionPlanHtml.shouldAttachPlanHtml(ctx.assistantMessage.sessionID, artifacts.hash, artifacts.ready)) {
@@ -4292,7 +4364,7 @@ index 2482e40fb..fbd8fe3f8 100644
          const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
 
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 083c23cc6..fafcb80f5 100644
+index 083c23cc6..e1ac7b52d 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
 @@ -18,6 +18,7 @@ import { SystemPrompt } from "./system"
@@ -4303,25 +4375,16 @@ index 083c23cc6..fafcb80f5 100644
  import BUILD_SWITCH from "../session/prompt/build-switch.txt"
  import MAX_STEPS from "../session/prompt/max-steps.txt"
  import { ToolRegistry } from "../tool/registry"
-@@ -251,6 +252,17 @@ export namespace SessionPrompt {
+@@ -251,6 +252,8 @@ export namespace SessionPrompt {
        }) {
          const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
          if (!userMessage) return input.messages
 +        const plan = Session.plan(input.session)
 +        const planUser = Session.planUser(input.session)
-+
-+        const planUserTaskPrompt = [
-+          `Read the internal technical plan at ${plan}.`,
-+          `Generate or update the user-facing review plan at ${planUser}.`,
-+          `Do not modify ${plan}; only update ${planUser}.`,
-+          `The user-facing file must start with the exact delimiter line ${SessionPlanUser.USER_PLAN_DELIMITER}.`,
-+          `After that delimiter, write XML only.`,
-+          `When you are done, reply with a short status sentence only.`,
-+        ].join("\n")
  
          if (!Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) {
            if (input.agent.name === "plan") {
-@@ -262,6 +274,53 @@ export namespace SessionPrompt {
+@@ -262,6 +265,49 @@ export namespace SessionPrompt {
                text: PROMPT_PLAN,
                synthetic: true,
              })
@@ -4336,13 +4399,9 @@ index 083c23cc6..fafcb80f5 100644
 +- User-facing review plan: ${planUser}
 +
 +Do NOT edit ${planUser} directly from the plan agent.
-+After you finish updating ${plan}, you MUST call the task tool with:
-+- description: Generate user plan
-+- subagent_type: plan_user
-+- prompt:
-+${planUserTaskPrompt}
-+
-+Wait for that subagent to complete, then respond with ONLY the final internal markdown plan and call plan_exit.
++The runtime will automatically invoke the dedicated plan_user subagent after your internal markdown plan is finalized and persisted.
++Do not call the task tool yourself for user-facing XML generation.
++Respond with ONLY the final internal markdown plan and then call plan_exit.
 +</system-reminder>`,
 +              synthetic: true,
 +            })
@@ -4375,7 +4434,7 @@ index 083c23cc6..fafcb80f5 100644
            }
            const wasPlan = input.messages.some((msg) => msg.info.role === "assistant" && msg.info.agent === "plan")
            if (wasPlan && input.agent.name === "build") {
-@@ -296,20 +355,23 @@ export namespace SessionPrompt {
+@@ -296,20 +342,23 @@ export namespace SessionPrompt {
  
          if (input.agent.name !== "plan" || assistantMessage?.info.agent === "plan") return input.messages
  
@@ -4404,7 +4463,7 @@ index 083c23cc6..fafcb80f5 100644
  
  ## Plan Workflow
  
-@@ -359,15 +421,58 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
+@@ -359,15 +408,57 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
  2. Ensure that the plans align with the user's original request
  3. Use question tool to clarify any remaining questions with the user
  
@@ -4420,11 +4479,10 @@ index 083c23cc6..fafcb80f5 100644
 +- Make sure the internal plan is fully self-contained after every rewrite
 +
 +### Phase 4b: Delegate User-Facing XML Generation
-+Goal: After the internal plan is final, delegate the review artifact to the plan_user subagent.
-+- Call the task tool with subagent_type \`plan_user\`
-+- Ask that subagent to read ${plan} and generate/update ${planUser}
-+- The subagent owns the XML format and must write only the user-facing file
-+- Wait for the subagent to complete successfully before ending plan mode
++Goal: After the internal plan is final, let the runtime delegate the review artifact to the plan_user subagent.
++- Do not call the task tool yourself for user-facing XML generation
++- The runtime will read ${plan}, invoke the dedicated \`plan_user\` subagent, and regenerate/update ${planUser}
++- End plan mode only after you have produced the final internal markdown plan
 +
 +## TDD Todo Contract
 +
@@ -4457,7 +4515,7 @@ index 083c23cc6..fafcb80f5 100644
 +
 +Structure the USER-FACING plan at ${planUser} like this:
 +- do NOT write it directly from the plan agent
-+- instead, delegate it to the \`plan_user\` subagent after the internal plan is finalized
++- the runtime will generate/update it through the dedicated \`plan_user\` subagent after your internal plan is finalized
 +
 +If the task is too small to require full TDD, say so explicitly and provide the lightest valid plan instead of forcing ceremony.
  
@@ -4483,7 +4541,7 @@ index 3737b74d8..85546b176 100644
  </system-reminder>
 
 diff --git a/packages/opencode/src/session/prompt/plan.txt b/packages/opencode/src/session/prompt/plan.txt
-index 1806e0eba..b6dcbb5be 100644
+index 1806e0eba..df6886f89 100644
 --- a/packages/opencode/src/session/prompt/plan.txt
 +++ b/packages/opencode/src/session/prompt/plan.txt
 @@ -23,4 +23,39 @@ Ask the user clarifying questions or ask for their opinion when weighing tradeof
@@ -4521,8 +4579,8 @@ index 1806e0eba..b6dcbb5be 100644
 +
 +Structure the USER-FACING plan like this:
 +- do NOT write it directly from the plan agent
-+- after finalizing the internal plan, call the task tool with subagent_type `plan_user` so that subagent can generate the XML user-facing file
-+- wait for the `plan_user` subagent to finish before calling `plan_exit`
++- the runtime will invoke the `plan_user` subagent after your internal markdown plan is finalized
++- do not call the task tool yourself for user-facing XML generation
 +
 +If the task is too small to require full TDD, say so explicitly and provide the lightest valid plan instead of forcing ceremony.
  </system-reminder>
