@@ -1,7 +1,7 @@
 # OpenCode Plan HTML
 
 ```bash
-bunx github:nicchia-code/opencode-planhtml#6ed9d3e39a2843b25c36831447d65ffe0b17dec3 --link-name opencode-dev
+bunx github:nicchia-code/opencode-planhtml#07c01632022e944c2f8d0e84ced8f831ee2fa123 --link-name opencode-dev
 ```
 
 This repo packages a source overlay for OpenCode that upgrades the native `plan` agent.
