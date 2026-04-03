@@ -18,6 +18,12 @@ index 767cb6da2..e5e3beaf0 100644
          "mime-types": "3.0.2",
          "minimatch": "10.0.3",
          "open": "10.1.2",
+@@ -727,4 +728,4 @@
+ 
+-    "@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.71.2", "", { "dependencies": { "json-schema-to-ts": "^3.1.1" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["zod"], "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-TGNDEUuEstk/DKu0/TflXAEt+p+p/WhTlFzEnoosvbaDU2LTjm42igSdlL0VijrKpWejtOKxX0b8A7uc+XiSAQ=="],
++    "@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.71.1", "", { "dependencies": { "json-schema-to-ts": "^3.1.1" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["zod"], "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-ViVzuaWMxHygfB2G6/1OufWDjbJGRl3duR0N1CEx/D5O9nv1yLNtbO3Lri5sQdF+aDHP+0nL6WyOMwCJUDicRQ=="],
+ 
+     "@anycable/core": ["@anycable/core@0.9.2", "", { "dependencies": { "nanoevents": "^7.0.1" } }, "sha512-x5ZXDcW/N4cxWl93CnbHs/u7qq4793jS2kNPWm+duPrXlrva+ml2ZGT7X9tuOBKzyIHf60zWCdIK7TUgMPAwXA=="],
 @@ -2935,9 +2937,9 @@
  
      "fast-uri": ["fast-uri@3.1.0", "", {}, "sha512-iPeeDKJSWf4IEOasVVrknXpaBV0IApz/gp7S2bb7Z4Lljbl2MGJRqInZiUrQwV16cpzw/D3S5j5Julj/gT52AA=="],
@@ -1963,6 +1969,13 @@ index d97046ca9..4047fdeff 100644
      "mime-types": "3.0.2",
      "minimatch": "10.0.3",
      "open": "10.1.2",
+@@ -155,5 +157,6 @@
+   },
+   "overrides": {
++    "@anthropic-ai/sdk": "0.71.1",
+     "drizzle-orm": "catalog:"
+   }
+ }
 
 diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
 index 96b71f816..457b47907 100644
