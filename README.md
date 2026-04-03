@@ -11,23 +11,23 @@ It does four things:
 
 ## Install From GitHub
 
-Run directly with Bun:
+Prefer pinning installs to a specific commit:
 
 ```bash
-bunx github:nicchia-code/opencode-planhtml --link-name opencode
+bunx github:nicchia-code/opencode-planhtml#<commit> --link-name opencode
 ```
 
 Or install the helper globally first:
 
 ```bash
-bun install -g github:nicchia-code/opencode-planhtml
+bun install -g github:nicchia-code/opencode-planhtml#<commit>
 opencode-planhtml --link-name opencode
 ```
 
 Upgrade an existing patched install by rerunning the same command:
 
 ```bash
-bunx github:nicchia-code/opencode-planhtml --link-name opencode
+bunx github:nicchia-code/opencode-planhtml#<commit> --link-name opencode
 ```
 
 Or, if you already installed the helper globally:
@@ -36,10 +36,11 @@ Or, if you already installed the helper globally:
 opencode-planhtml --link-name opencode
 ```
 
-If Bun seems to reuse an older cached GitHub package revision, force the latest repo state:
+If Bun seems to reuse an older cached GitHub package revision, clear the Bun cache first:
 
 ```bash
-bunx github:nicchia-code/opencode-planhtml#main --link-name opencode
+bun pm cache rm
+bunx github:nicchia-code/opencode-planhtml#<commit> --link-name opencode
 ```
 
 By default this will:
