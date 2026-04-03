@@ -4255,7 +4255,7 @@ index 2482e40fb..387592542 100644
          const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
 
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 083c23cc6..e16f43a13 100644
+index 083c23cc6..e7e2f4ff6 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
 @@ -18,6 +18,7 @@ import { SystemPrompt } from "./system"
@@ -4311,7 +4311,7 @@ index 083c23cc6..e16f43a13 100644
  
  ## Plan Workflow
  
-@@ -359,15 +374,48 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
+@@ -359,15 +374,54 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
  2. Ensure that the plans align with the user's original request
  3. Use question tool to clarify any remaining questions with the user
  
@@ -4345,16 +4345,22 @@ index 083c23cc6..e16f43a13 100644
 +If the user provides pseudocode or a detailed implementation plan, preserve it faithfully.
 +Do not silently rewrite the user's algorithm into a different one unless you explicitly call out the deviation and why it is necessary.
 +
-+The visible plan must match the todo list.
++Both plan files must match the todo list and describe the same recommended approach.
 +Todos are the execution contract, not scratch notes.
 +
-+Structure the final plan so it can be rendered cleanly for the user:
++Structure the INTERNAL execution plan at ${plan} like this:
 +- start with \`# Goal\`
 +- then \`# Plan Rationale\`
 +- then \`# Actions\`
 +- use \`## Step N: ...\` for each major step
 +- in every major step include explicit \`What:\`, \`Why:\`, and \`Files/Tests:\` lines before the detailed bullets
-+- keep the final summary concise enough that a rendered HTML view can generate anchors and a final summary table from those sections
++- keep the internal markdown concise enough that downstream tooling can still derive a rendered summary from it
++
++Structure the USER-FACING plan at ${planUser} like this:
++- start with the exact delimiter line \`=== USER PLAN ===\`
++- after that delimiter, write XML only
++- do NOT start the user-facing file with markdown headings like \`# Goal\`; those headings belong to the internal markdown plan only
++- make the XML mirror the same recommended approach as the internal plan, but in a reviewer-friendly structure
 +
 +If the task is too small to require full TDD, say so explicitly and provide the lightest valid plan instead of forcing ceremony.
  
@@ -4380,10 +4386,10 @@ index 3737b74d8..85546b176 100644
  </system-reminder>
 
 diff --git a/packages/opencode/src/session/prompt/plan.txt b/packages/opencode/src/session/prompt/plan.txt
-index 1806e0eba..aee87dae2 100644
+index 1806e0eba..1b4d0dce2 100644
 --- a/packages/opencode/src/session/prompt/plan.txt
 +++ b/packages/opencode/src/session/prompt/plan.txt
-@@ -23,4 +23,34 @@ Ask the user clarifying questions or ask for their opinion when weighing tradeof
+@@ -23,4 +23,38 @@ Ask the user clarifying questions or ask for their opinion when weighing tradeof
  ## Important
  
  The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
@@ -4405,26 +4411,30 @@ index 1806e0eba..aee87dae2 100644
 +If the user provides pseudocode or a detailed implementation plan, preserve it faithfully.
 +Do not silently rewrite the user's algorithm into a different one unless you explicitly call out the deviation and why it is necessary.
 +
-+The visible plan must match the todo list.
++Both plan files must match the todo list and describe the same recommended approach.
 +Todos are the execution contract, not scratch notes.
 +
-+Structure the final plan so it can be rendered cleanly for the user:
++Structure the INTERNAL execution plan like this:
 +- start with `# Goal`
 +- then `# Plan Rationale`
 +- then `# Actions`
 +- use `## Step N: ...` for each major step
 +- in every major step include explicit `What:`, `Why:`, and `Files/Tests:` lines before the detailed bullets
-+- keep the final summary concise enough that a rendered HTML view can generate anchors and a final summary table from those sections
++
++Structure the USER-FACING plan like this:
++- start with the exact delimiter line `=== USER PLAN ===`
++- after that delimiter, write XML only
++- do NOT start the user-facing file with markdown headings like `# Goal`; those headings belong to the internal markdown plan only
 +
 +If the task is too small to require full TDD, say so explicitly and provide the lightest valid plan instead of forcing ceremony.
  </system-reminder>
 
 diff --git a/packages/opencode/src/session/prompt/plan-user.txt b/packages/opencode/src/session/prompt/plan-user.txt
 new file mode 100644
-index 000000000..7a121be8c
+index 000000000..72b6c2850
 --- /dev/null
 +++ b/packages/opencode/src/session/prompt/plan-user.txt
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,51 @@
 +<system-reminder>
 +## User-Facing Plan File
 +
@@ -4474,6 +4484,7 @@ index 000000000..7a121be8c
 +- Use `<details><item>...</item></details>` for bullet-style supporting details when relevant.
 +- Keep the XML valid and complete after every rewrite.
 +- Do not include internal-plan-only content before or after the XML payload.
++- If another instruction mentions markdown headings like `# Goal`, interpret that as guidance for the INTERNAL plan only, not for this user-facing XML file.
 +</system-reminder>
 
 diff --git a/packages/opencode/src/tool/plan.ts b/packages/opencode/src/tool/plan.ts
