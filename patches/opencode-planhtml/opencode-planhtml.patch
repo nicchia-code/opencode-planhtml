@@ -1831,7 +1831,7 @@ index d97046ca9..4047fdeff 100644
      "open": "10.1.2",
 
 diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
-index 96b71f816..9a2d89c56 100644
+index 96b71f816..71d4508f0 100644
 --- a/packages/opencode/src/agent/agent.ts
 +++ b/packages/opencode/src/agent/agent.ts
 @@ -128,6 +128,7 @@ export namespace Agent {
@@ -1842,6 +1842,36 @@ index 96b71f816..9a2d89c56 100644
                    external_directory: {
                      [path.join(Global.Path.data, "plans", "*")]: "allow",
                    },
+@@ -143,6 +144,29 @@ export namespace Agent {
+               mode: "primary",
+               native: true,
+             },
++            plan_user: {
++              name: "plan_user",
++              description: "Generates the user-facing XML review plan from the approved internal markdown plan.",
++              options: {},
++              permission: Permission.merge(
++                defaults,
++                Permission.fromConfig({
++                  "*": "deny",
++                  read: "allow",
++                  external_directory: {
++                    [path.join(Global.Path.data, "plans", "*")]: "allow",
++                  },
++                  edit: {
++                    [path.join(".opencode", "plans", "*.user.md")]: "allow",
++                    [path.relative(Instance.worktree, path.join(Global.Path.data, path.join("plans", "*.user.md")))]:
++                      "allow",
++                  },
++                }),
++                user,
++              ),
++              mode: "subagent",
++              native: true,
++            },
+             general: {
+               name: "general",
+               description: `General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel.`,
 
 diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
 index a83645d89..1bda19701 100644
@@ -2168,10 +2198,10 @@ index 5ed5acafa..5885faf4a 100644
 
 diff --git a/packages/opencode/src/session/plan-action.ts b/packages/opencode/src/session/plan-action.ts
 new file mode 100644
-index 000000000..7eec6096b
+index 000000000..d9d986a98
 --- /dev/null
 +++ b/packages/opencode/src/session/plan-action.ts
-@@ -0,0 +1,375 @@
+@@ -0,0 +1,360 @@
 +import fs from "node:fs/promises"
 +import path from "node:path"
 +import { setTimeout as sleep } from "node:timers/promises"
@@ -2344,12 +2374,12 @@ index 000000000..7eec6096b
 +  const bySection = new Map(input.document.sections.map((section) => [section.id, section]))
 +  const userTargets = input.user ? new Map(SessionPlanUser.flattenPlanUserTargets(input.user.document).map((target) => [target.id, target])) : new Map()
 +  const lines = [
-+    "Revise the current internal plan and the current user-facing plan using the comments below.",
++    "Revise the current internal technical plan using the comments below.",
 +    "",
-+    "Both plans must remain fully self-contained.",
++    "The internal plan must remain fully self-contained.",
 +    "Do not refer to a previous plan, an earlier version, or unchanged sections elsewhere.",
 +    "Preserve the overall structure unless a requested change requires otherwise.",
-+    "Keep untouched areas as-is when possible, but always rewrite both final plan files as complete standalone documents.",
++    "Keep untouched areas as-is when possible, but always rewrite the final internal plan file as a complete standalone document.",
 +    "The internal plan must still follow:",
 +    "# Goal",
 +    "# Plan Rationale",
@@ -2359,23 +2389,8 @@ index 000000000..7eec6096b
 +    "Why:",
 +    "Files/Tests:",
 +    "",
-+    "",
-+    "The user-facing plan must still follow:",
-+    "=== USER PLAN ===",
-+    "<user_plan>",
-+    "  <title>...</title>",
-+    "  <goal><p>...</p></goal>",
-+    "  <rationale><p>...</p></rationale>",
-+    "  <steps>",
-+    "    <step>",
-+    "      <title>...</title>",
-+    "      <what>...</what>",
-+    "      <why>...</why>",
-+    "      <files_tests><item>...</item></files_tests>",
-+    "      <details><item>...</item></details>",
-+    "    </step>",
-+    "  </steps>",
-+    "</user_plan>",
++    "After updating the internal plan, call the task tool with subagent_type `plan_user` so the dedicated subagent can regenerate the user-facing XML review file.",
++    "Do not paste the XML into your visible assistant response.",
 +    "",
 +    "Requested revisions:",
 +  ]
@@ -4277,7 +4292,7 @@ index 2482e40fb..fbd8fe3f8 100644
          const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
 
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 083c23cc6..d0c275659 100644
+index 083c23cc6..fafcb80f5 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
 @@ -18,6 +18,7 @@ import { SystemPrompt } from "./system"
@@ -4288,7 +4303,25 @@ index 083c23cc6..d0c275659 100644
  import BUILD_SWITCH from "../session/prompt/build-switch.txt"
  import MAX_STEPS from "../session/prompt/max-steps.txt"
  import { ToolRegistry } from "../tool/registry"
-@@ -262,6 +263,14 @@ export namespace SessionPrompt {
+@@ -251,6 +252,17 @@ export namespace SessionPrompt {
+       }) {
+         const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
+         if (!userMessage) return input.messages
++        const plan = Session.plan(input.session)
++        const planUser = Session.planUser(input.session)
++
++        const planUserTaskPrompt = [
++          `Read the internal technical plan at ${plan}.`,
++          `Generate or update the user-facing review plan at ${planUser}.`,
++          `Do not modify ${plan}; only update ${planUser}.`,
++          `The user-facing file must start with the exact delimiter line ${SessionPlanUser.USER_PLAN_DELIMITER}.`,
++          `After that delimiter, write XML only.`,
++          `When you are done, reply with a short status sentence only.`,
++        ].join("\n")
+ 
+         if (!Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) {
+           if (input.agent.name === "plan") {
+@@ -262,6 +274,53 @@ export namespace SessionPrompt {
                text: PROMPT_PLAN,
                synthetic: true,
              })
@@ -4297,17 +4330,56 @@ index 083c23cc6..d0c275659 100644
 +              messageID: userMessage.info.id,
 +              sessionID: userMessage.info.sessionID,
 +              type: "text",
++              text: `<system-reminder>
++Plan files:
++- Internal technical plan: ${plan}
++- User-facing review plan: ${planUser}
++
++Do NOT edit ${planUser} directly from the plan agent.
++After you finish updating ${plan}, you MUST call the task tool with:
++- description: Generate user plan
++- subagent_type: plan_user
++- prompt:
++${planUserTaskPrompt}
++
++Wait for that subagent to complete, then respond with ONLY the final internal markdown plan and call plan_exit.
++</system-reminder>`,
++              synthetic: true,
++            })
++          }
++          if (input.agent.name === "plan_user") {
++            userMessage.parts.push({
++              id: PartID.ascending(),
++              messageID: userMessage.info.id,
++              sessionID: userMessage.info.sessionID,
++              type: "text",
 +              text: PROMPT_PLAN_USER,
++              synthetic: true,
++            })
++            userMessage.parts.push({
++              id: PartID.ascending(),
++              messageID: userMessage.info.id,
++              sessionID: userMessage.info.sessionID,
++              type: "text",
++              text: `<system-reminder>
++Internal technical plan path: ${plan}
++User-facing review plan path: ${planUser}
++
++Read the internal technical plan and update only the user-facing review plan file.
++Do not modify the internal technical plan file.
++Do not call plan_exit.
++When finished, reply with one short confirmation sentence.
++</system-reminder>`,
 +              synthetic: true,
 +            })
            }
            const wasPlan = input.messages.some((msg) => msg.info.role === "assistant" && msg.info.agent === "plan")
            if (wasPlan && input.agent.name === "build") {
-@@ -297,19 +306,25 @@ export namespace SessionPrompt {
+@@ -296,20 +355,23 @@ export namespace SessionPrompt {
+ 
          if (input.agent.name !== "plan" || assistantMessage?.info.agent === "plan") return input.messages
  
-         const plan = Session.plan(input.session)
-+        const planUser = Session.planUser(input.session)
+-        const plan = Session.plan(input.session)
          const exists = yield* fsys.existsSafe(plan)
 -        if (!exists) yield* fsys.ensureDir(path.dirname(plan)).pipe(Effect.catch(Effect.die))
 +        const userExists = yield* fsys.existsSafe(planUser)
@@ -4325,30 +4397,34 @@ index 083c23cc6..d0c275659 100644
 -${exists ? `A plan file already exists at ${plan}. You can read it and make incremental edits using the edit tool.` : `No plan file exists yet. You should create your plan at ${plan} using the write tool.`}
 -You should build your plan incrementally by writing to or editing this file. NOTE that this is the only file you are allowed to edit - other than this you are only allowed to take READ-ONLY actions.
 +${exists ? `An internal plan file already exists at ${plan}. You can read it and make incremental edits using the edit tool.` : `No internal plan file exists yet. You should create it at ${plan} using the write tool.`}
-+${userExists ? `A user-facing plan file already exists at ${planUser}. You can read it and make incremental edits using the edit tool.` : `No user-facing plan file exists yet. You should create it at ${planUser} using the write tool.`}
-+You must keep BOTH plan files updated together. The internal plan is for execution. The user-facing plan is for human review.
-+Both plans must be complete and self-contained after every update. Never refer to a previous plan version, unchanged sections elsewhere, or earlier drafts.
-+The user-facing plan must contain the exact delimiter line === USER PLAN === immediately before the XML user-facing content begins.
++${userExists ? `A user-facing plan file already exists at ${planUser}. The dedicated plan_user subagent can regenerate it after you finish the internal plan.` : `No user-facing plan file exists yet. The dedicated plan_user subagent should create it at ${planUser} after you finish the internal plan.`}
++The internal plan at ${plan} is the execution source of truth. The user-facing plan at ${planUser} is a separate review artifact generated by the dedicated plan_user subagent.
++Both plans must describe the same recommended approach, but the plan agent owns only the internal markdown plan directly.
 +NOTE that these are the only files you are allowed to edit - other than these you are only allowed to take READ-ONLY actions.
  
  ## Plan Workflow
  
-@@ -359,15 +374,56 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
+@@ -359,15 +421,58 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
  2. Ensure that the plans align with the user's original request
  3. Use question tool to clarify any remaining questions with the user
  
 -### Phase 4: Final Plan
 -Goal: Write your final plan to the plan file (the only file you can edit).
-+### Phase 4: Final Plans
-+Goal: Write your final internal plan to ${plan} and your final user-facing plan to ${planUser}.
++### Phase 4: Final Internal Plan
++Goal: Write your final internal plan to ${plan}.
  - Include only your recommended approach, not all alternatives
 -- Ensure that the plan file is concise enough to scan quickly, but detailed enough to execute effectively
 +- Ensure that the internal plan is concise enough to scan quickly, but detailed enough to execute effectively
-+- Ensure that the user-facing plan is easier to read, more explanatory, and suitable for interactive review
-+- Ensure that the user-facing plan contains the exact delimiter line === USER PLAN === immediately before the XML payload
  - Include the paths of critical files to be modified
  - Include a verification section describing how to test the changes end-to-end (run the code, use MCP tools, run tests)
-+- Make sure both plan files are fully self-contained after every rewrite
++- Make sure the internal plan is fully self-contained after every rewrite
++
++### Phase 4b: Delegate User-Facing XML Generation
++Goal: After the internal plan is final, delegate the review artifact to the plan_user subagent.
++- Call the task tool with subagent_type \`plan_user\`
++- Ask that subagent to read ${plan} and generate/update ${planUser}
++- The subagent owns the XML format and must write only the user-facing file
++- Wait for the subagent to complete successfully before ending plan mode
 +
 +## TDD Todo Contract
 +
@@ -4380,11 +4456,8 @@ index 083c23cc6..d0c275659 100644
 +- your FINAL visible assistant response in plan mode must contain ONLY this internal markdown plan, because the runtime persists that visible response as the technical plan file
 +
 +Structure the USER-FACING plan at ${planUser} like this:
-+- start with the exact delimiter line \`=== USER PLAN ===\`
-+- after that delimiter, write XML only
-+- do NOT start the user-facing file with markdown headings like \`# Goal\`; those headings belong to the internal markdown plan only
-+- make the XML mirror the same recommended approach as the internal plan, but in a reviewer-friendly structure
-+- write the user-facing XML only to ${planUser}; do NOT paste the XML into your final visible assistant response
++- do NOT write it directly from the plan agent
++- instead, delegate it to the \`plan_user\` subagent after the internal plan is finalized
 +
 +If the task is too small to require full TDD, say so explicitly and provide the lightest valid plan instead of forcing ceremony.
  
@@ -4410,10 +4483,10 @@ index 3737b74d8..85546b176 100644
  </system-reminder>
 
 diff --git a/packages/opencode/src/session/prompt/plan.txt b/packages/opencode/src/session/prompt/plan.txt
-index 1806e0eba..42b1964d9 100644
+index 1806e0eba..b6dcbb5be 100644
 --- a/packages/opencode/src/session/prompt/plan.txt
 +++ b/packages/opencode/src/session/prompt/plan.txt
-@@ -23,4 +23,40 @@ Ask the user clarifying questions or ask for their opinion when weighing tradeof
+@@ -23,4 +23,39 @@ Ask the user clarifying questions or ask for their opinion when weighing tradeof
  ## Important
  
  The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
@@ -4447,24 +4520,25 @@ index 1806e0eba..42b1964d9 100644
 +- your FINAL visible assistant response in plan mode must contain only this internal markdown plan
 +
 +Structure the USER-FACING plan like this:
-+- start with the exact delimiter line `=== USER PLAN ===`
-+- after that delimiter, write XML only
-+- do NOT start the user-facing file with markdown headings like `# Goal`; those headings belong to the internal markdown plan only
-+- write the user-facing XML only to the user-facing plan file, not in the visible assistant response
++- do NOT write it directly from the plan agent
++- after finalizing the internal plan, call the task tool with subagent_type `plan_user` so that subagent can generate the XML user-facing file
++- wait for the `plan_user` subagent to finish before calling `plan_exit`
 +
 +If the task is too small to require full TDD, say so explicitly and provide the lightest valid plan instead of forcing ceremony.
  </system-reminder>
 
 diff --git a/packages/opencode/src/session/prompt/plan-user.txt b/packages/opencode/src/session/prompt/plan-user.txt
 new file mode 100644
-index 000000000..0d463a9d0
+index 000000000..be9ef8930
 --- /dev/null
 +++ b/packages/opencode/src/session/prompt/plan-user.txt
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,54 @@
 +<system-reminder>
 +## User-Facing Plan File
 +
-+In addition to the internal execution plan, you must maintain a second file for the user-facing review experience.
++You are the dedicated subagent responsible for the user-facing review artifact.
++The internal execution plan already exists and is the source of truth.
++Your job is to transform that technical plan into a separate user-facing review file.
 +
 +The user-facing plan MUST:
 +- be fully self-contained
@@ -5166,7 +5240,7 @@ index 000000000..3d47cd253
 
 diff --git a/packages/opencode/test/session/plan-html.test.ts b/packages/opencode/test/session/plan-html.test.ts
 new file mode 100644
-index 000000000..431730c90
+index 000000000..cc870c47f
 --- /dev/null
 +++ b/packages/opencode/test/session/plan-html.test.ts
 @@ -0,0 +1,376 @@
@@ -5319,7 +5393,7 @@ index 000000000..431730c90
 +      persistedMarkdown: SAMPLE_PLAN,
 +    })
 +
-+    expect(selected).toBe(SAMPLE_PLAN)
++    expect(selected).toBe(SAMPLE_PLAN.trim())
 +  })
 +
 +  test("opens only for plans with final structure and dedupes attachments per version", () => {
