@@ -28,6 +28,7 @@ const PATCHED_FILES = [
   "packages/app/src/pages/session-plan.tsx",
   "packages/opencode/package.json",
   "packages/opencode/src/agent/agent.ts",
+  "packages/opencode/src/cli/cmd/tui/routes/session/index.tsx",
   "packages/opencode/src/cli/cmd/tui/worker.ts",
   "packages/opencode/src/flag/flag.ts",
   "packages/opencode/src/server/instance.ts",

@@ -1831,18 +1831,19 @@ index d97046ca9..4047fdeff 100644
      "open": "10.1.2",
 
 diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
-index 96b71f816..71d4508f0 100644
+index 96b71f816..457b47907 100644
 --- a/packages/opencode/src/agent/agent.ts
 +++ b/packages/opencode/src/agent/agent.ts
-@@ -128,6 +128,7 @@ export namespace Agent {
+@@ -127,7 +127,7 @@ export namespace Agent {
+                 defaults,
                  Permission.fromConfig({
                    question: "allow",
-                   plan_exit: "allow",
+-                  plan_exit: "allow",
 +                  todowrite: "allow",
                    external_directory: {
                      [path.join(Global.Path.data, "plans", "*")]: "allow",
                    },
-@@ -143,6 +144,29 @@ export namespace Agent {
+@@ -143,6 +143,29 @@ export namespace Agent {
                mode: "primary",
                native: true,
              },
@@ -1872,6 +1873,45 @@ index 96b71f816..71d4508f0 100644
              general: {
                name: "general",
                description: `General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel.`,
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index fb62de9ac..088358589 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -167,6 +167,7 @@ export function Session() {
+   })
+   const showTimestamps = createMemo(() => timestamps() === "show")
+   const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - 4)
++  let lastOpenedPlanMessage: string | undefined
+ 
+   const scrollAcceleration = createMemo(() => {
+     const tui = tuiConfig
+@@ -186,6 +187,25 @@ export function Session() {
+     }
+   })
+ 
++  createEffect(() => {
++    const message = lastAssistant()
++    if (!message) return
++    if (message.role !== "assistant") return
++    if (message.agent !== "plan") return
++    if (!message.finish || message.finish === "tool-calls") return
++    if (message.id === lastOpenedPlanMessage) return
++
++    lastOpenedPlanMessage = message.id
++    void sdk
++      .fetch(`${sdk.url}/session/${route.sessionID}/plan/open`, {
++        method: "POST",
++        headers: {
++          ...(sdk.directory ? { "x-opencode-directory": sdk.directory } : {}),
++        },
++      })
++      .catch(() => {})
++  })
++
+   createEffect(async () => {
+     await sync.session
+       .sync(route.sessionID)
 
 diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
 index a83645d89..1bda19701 100644
@@ -2021,10 +2061,10 @@ index 4bb6efaf9..c42ac40f4 100644
 
 diff --git a/packages/opencode/src/server/routes/session-plan.ts b/packages/opencode/src/server/routes/session-plan.ts
 new file mode 100644
-index 000000000..51cbcc4c2
+index 000000000..8e84d855b
 --- /dev/null
 +++ b/packages/opencode/src/server/routes/session-plan.ts
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,181 @@
 +import fs from "node:fs/promises"
 +import { Hono } from "hono"
 +import { describeRoute, resolver, validator } from "hono-openapi"
@@ -2034,6 +2074,7 @@ index 000000000..51cbcc4c2
 +import { Session } from "../../session"
 +import * as SessionPlanAction from "../../session/plan-action"
 +import * as SessionPlanHtml from "../../session/plan-html"
++import { MessageV2 } from "../../session/message-v2"
 +import { lazy } from "../../util/lazy"
 +
 +const params = z.object({
@@ -2042,6 +2083,44 @@ index 000000000..51cbcc4c2
 +
 +export const SessionPlanRoutes = lazy(() =>
 +  new Hono()
++    .post("/:sessionID/plan/open", validator("param", params), async (c) => {
++      const sessionID = c.req.valid("param").sessionID
++      const session = await Session.get(sessionID)
++
++      let markdown: string | undefined
++      try {
++        const persisted = await fs.readFile(Session.plan(session), "utf8")
++        if (SessionPlanHtml.isPlanReadyForOpen(persisted)) markdown = persisted
++      } catch (error) {
++        if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw error
++      }
++
++      if (!markdown) {
++        const page = await MessageV2.page({ sessionID, limit: 50 })
++        const latestPlan = page.items.findLast((message) => message.info.role === "assistant" && message.info.agent === "plan" && message.info.finish)
++        if (latestPlan) {
++          const candidate = SessionPlanHtml.markdownFromParts(latestPlan.parts)
++          if (SessionPlanHtml.isPlanReadyForOpen(candidate)) markdown = candidate
++        }
++      }
++
++      if (!markdown) {
++        return c.json({ error: "plan_not_ready" }, 409)
++      }
++
++      const artifacts = await SessionPlanHtml.renderPlanArtifacts({
++        session,
++        markdown,
++        autoOpen: true,
++      })
++
++      return c.json({
++        ready: artifacts.ready,
++        opened: artifacts.opened,
++        liveUrl: artifacts.liveUrl,
++        hash: artifacts.hash,
++      })
++    })
 +    .get(
 +      "/:sessionID/plan/user",
 +      describeRoute({
@@ -4216,7 +4295,7 @@ index 000000000..d5e2f94b5
 +}
 
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 2482e40fb..4b0f32bbf 100644
+index 2482e40fb..05242c26f 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
 @@ -1,8 +1,11 @@
@@ -4240,17 +4319,15 @@ index 2482e40fb..4b0f32bbf 100644
  import { PartID } from "./schema"
  import type { SessionID } from "./schema"
  import { SessionRetry } from "./retry"
-@@ -98,6 +103,59 @@ export namespace SessionProcessor {
+@@ -98,6 +103,57 @@ export namespace SessionProcessor {
          }
          let aborted = false
  
 +        const generateUserFacingPlan = Effect.fn("SessionProcessor.generateUserFacingPlan")(function* (sessionInfo: Session.Info, markdown: string) {
 +          if (!SessionPlanHtml.isPlanReadyForOpen(markdown)) return undefined
 +
-+          const planPath = Session.plan(sessionInfo)
 +          const planUserPath = Session.planUser(sessionInfo)
-+          yield* Effect.tryPromise(() => fs.mkdir(path.dirname(planPath), { recursive: true }))
-+          yield* Effect.tryPromise(() => fs.writeFile(planPath, markdown, "utf8"))
++          const planPath = Session.plan(sessionInfo)
 +
 +          const planUserAgent = yield* agents.get("plan_user")
 +          if (!planUserAgent) return undefined
@@ -4300,7 +4377,7 @@ index 2482e40fb..4b0f32bbf 100644
          const parse = (e: unknown) =>
            MessageV2.fromError(e, {
              providerID: input.model.providerID,
-@@ -407,6 +465,61 @@ export namespace SessionProcessor {
+@@ -407,6 +463,93 @@ export namespace SessionProcessor {
            }
            ctx.assistantMessage.time.completed = Date.now()
            yield* session.updateMessage(ctx.assistantMessage)
@@ -4324,8 +4401,29 @@ index 2482e40fb..4b0f32bbf 100644
 +                persistedMarkdown,
 +              })
 +              if (!markdown) return
++              const planPath = Session.plan(info)
++              yield* Effect.tryPromise(() => fs.mkdir(path.dirname(planPath), { recursive: true })).pipe(
++                Effect.catch((error) => {
++                  log.error("persist internal plan directory failed", {
++                    sessionID: ctx.sessionID,
++                    planPath,
++                    error: error instanceof Error ? error.message : String(error),
++                  })
++                  return Effect.fail(error)
++                }),
++              )
++              yield* Effect.tryPromise(() => fs.writeFile(planPath, markdown, "utf8")).pipe(
++                Effect.catch((error) => {
++                  log.error("persist internal plan file failed", {
++                    sessionID: ctx.sessionID,
++                    planPath,
++                    error: error instanceof Error ? error.message : String(error),
++                  })
++                  return Effect.fail(error)
++                }),
++              )
 +              const userMarkdown = yield* generateUserFacingPlan(info, markdown).pipe(
-+                Effect.catchAll((error) => {
++                Effect.catch((error) => {
 +                  log.error("plan_user subagent failed", {
 +                    sessionID: ctx.sessionID,
 +                    error: error instanceof Error ? error.message : String(error),
@@ -4338,6 +4436,17 @@ index 2482e40fb..4b0f32bbf 100644
 +                  session: info,
 +                  markdown,
 +                  userMarkdown,
++                }),
++              ).pipe(
++                Effect.catch((error) => {
++                  log.error("render plan artifacts failed", {
++                    sessionID: ctx.sessionID,
++                    planPath,
++                    userPlanPath: Session.planUser(info),
++                    error: error instanceof Error ? error.message : String(error),
++                    stack: error instanceof Error ? error.stack : undefined,
++                  })
++                  return Effect.fail(error)
 +                }),
 +              )
 +              if (SessionPlanHtml.shouldAttachPlanHtml(ctx.assistantMessage.sessionID, artifacts.hash, artifacts.ready)) {
@@ -4364,7 +4473,7 @@ index 2482e40fb..4b0f32bbf 100644
          const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
 
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 083c23cc6..e1ac7b52d 100644
+index 083c23cc6..98ff5f30a 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
 @@ -18,6 +18,7 @@ import { SystemPrompt } from "./system"
@@ -4375,7 +4484,15 @@ index 083c23cc6..e1ac7b52d 100644
  import BUILD_SWITCH from "../session/prompt/build-switch.txt"
  import MAX_STEPS from "../session/prompt/max-steps.txt"
  import { ToolRegistry } from "../tool/registry"
-@@ -251,6 +252,8 @@ export namespace SessionPrompt {
+@@ -45,6 +46,7 @@ import { AppFileSystem } from "@/filesystem"
+ import { Truncate } from "@/tool/truncate"
+ import { decodeDataUrl } from "@/util/data-url"
+ import { Process } from "@/util/process"
++import * as SessionPlanHtml from "./plan-html"
+ import { Cause, Effect, Exit, Layer, Option, Scope, ServiceMap } from "effect"
+ import { InstanceState } from "@/effect/instance-state"
+ import { makeRuntime } from "@/effect/run-service"
+@@ -251,6 +253,8 @@ export namespace SessionPrompt {
        }) {
          const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
          if (!userMessage) return input.messages
@@ -4384,7 +4501,7 @@ index 083c23cc6..e1ac7b52d 100644
  
          if (!Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) {
            if (input.agent.name === "plan") {
-@@ -262,6 +265,49 @@ export namespace SessionPrompt {
+@@ -262,6 +266,50 @@ export namespace SessionPrompt {
                text: PROMPT_PLAN,
                synthetic: true,
              })
@@ -4401,7 +4518,8 @@ index 083c23cc6..e1ac7b52d 100644
 +Do NOT edit ${planUser} directly from the plan agent.
 +The runtime will automatically invoke the dedicated plan_user subagent after your internal markdown plan is finalized and persisted.
 +Do not call the task tool yourself for user-facing XML generation.
-+Respond with ONLY the final internal markdown plan and then call plan_exit.
++Respond with ONLY the final internal markdown plan.
++Do NOT call plan_exit. The user will review the generated plan in the review UI and approve it there.
 +</system-reminder>`,
 +              synthetic: true,
 +            })
@@ -4434,7 +4552,7 @@ index 083c23cc6..e1ac7b52d 100644
            }
            const wasPlan = input.messages.some((msg) => msg.info.role === "assistant" && msg.info.agent === "plan")
            if (wasPlan && input.agent.name === "build") {
-@@ -296,20 +342,23 @@ export namespace SessionPrompt {
+@@ -296,20 +344,23 @@ export namespace SessionPrompt {
  
          if (input.agent.name !== "plan" || assistantMessage?.info.agent === "plan") return input.messages
  
@@ -4463,7 +4581,7 @@ index 083c23cc6..e1ac7b52d 100644
  
  ## Plan Workflow
  
-@@ -359,15 +408,57 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
+@@ -359,18 +410,61 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
  2. Ensure that the plans align with the user's original request
  3. Use question tool to clarify any remaining questions with the user
  
@@ -4519,12 +4637,80 @@ index 083c23cc6..e1ac7b52d 100644
 +
 +If the task is too small to require full TDD, say so explicitly and provide the lightest valid plan instead of forcing ceremony.
  
- ### Phase 5: Call plan_exit tool
+-### Phase 5: Call plan_exit tool
 -At the very end of your turn, once you have asked the user questions and are happy with your final plan file - you should always call plan_exit to indicate to the user that you are done planning.
-+At the very end of your turn, once you have asked the user questions and are happy with your final plan files - you should always call plan_exit to indicate to the user that you are done planning.
- This is critical - your turn should only end with either asking the user a question or calling plan_exit. Do not stop unless it's for these 2 reasons.
+-This is critical - your turn should only end with either asking the user a question or calling plan_exit. Do not stop unless it's for these 2 reasons.
++### Phase 5: Stop In Plan Mode
++At the end of your turn, respond with the final internal markdown plan only.
++Do not call plan_exit.
++The runtime will open the review UI, and the user will approve or request revisions from there.
  
- **Important:** Use question tool to clarify requirements/approach, use plan_exit to request plan approval. Do NOT use question tool to ask "Is this plan okay?" - that's what plan_exit does.
+-**Important:** Use question tool to clarify requirements/approach, use plan_exit to request plan approval. Do NOT use question tool to ask "Is this plan okay?" - that's what plan_exit does.
++**Important:** Use question tool to clarify requirements or approach. Do not try to switch to build mode from the plan agent turn.
+ 
+ NOTE: At any point in time through this workflow you should feel free to ask the user questions or clarifications. Don't make large assumptions about user intent. The goal is to present a well researched plan to the user, and tie any loose ends before implementation begins.
+ </system-reminder>`,
+@@ -1331,6 +1425,32 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+           throw new Error("Impossible")
+         })
+ 
++      const finalizePlanReview = Effect.fn("SessionPrompt.finalizePlanReview")(function* (input: {
++        sessionID: SessionID
++        assistant: MessageV2.WithParts
++      }) {
++        if (Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) return
++        if (input.assistant.info.role !== "assistant") return
++        if (input.assistant.info.agent !== "plan") return
++        if (!input.assistant.info.finish || input.assistant.info.finish === "tool-calls") return
++        if (input.assistant.info.error) return
++
++        const markdown = SessionPlanHtml.markdownFromParts(input.assistant.parts)
++        if (!SessionPlanHtml.isPlanReadyForOpen(markdown)) return
++
++        const info = yield* sessions.get(input.sessionID)
++        yield* Effect.tryPromise(() => SessionPlanHtml.renderPlanArtifacts({ session: info, markdown })).pipe(
++          Effect.catch((error) =>
++            Effect.sync(() => {
++              log.warn("plan review finalize failed", {
++                sessionID: input.sessionID,
++                error: error instanceof Error ? error.message : String(error),
++              })
++            }),
++          ),
++        )
++      })
++
+       const runLoop: (sessionID: SessionID) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.run")(
+         function* (sessionID: SessionID) {
+           const ctx = yield* InstanceState.context
+@@ -1346,12 +1466,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+ 
+             let lastUser: MessageV2.User | undefined
+             let lastAssistant: MessageV2.Assistant | undefined
++            let lastAssistantMsg: MessageV2.WithParts | undefined
+             let lastFinished: MessageV2.Assistant | undefined
+             let tasks: (MessageV2.CompactionPart | MessageV2.SubtaskPart)[] = []
+             for (let i = msgs.length - 1; i >= 0; i--) {
+               const msg = msgs[i]
+               if (!lastUser && msg.info.role === "user") lastUser = msg.info
+-              if (!lastAssistant && msg.info.role === "assistant") lastAssistant = msg.info
++              if (!lastAssistant && msg.info.role === "assistant") {
++                lastAssistant = msg.info
++                lastAssistantMsg = msg
++              }
+               if (!lastFinished && msg.info.role === "assistant" && msg.info.finish) lastFinished = msg.info
+               if (lastUser && lastFinished) break
+               const task = msg.parts.filter((part) => part.type === "compaction" || part.type === "subtask")
+@@ -1364,6 +1488,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+               !["tool-calls"].includes(lastAssistant.finish) &&
+               lastUser.id < lastAssistant.id
+             ) {
++              if (lastAssistantMsg) {
++                yield* finalizePlanReview({ sessionID, assistant: lastAssistantMsg })
++              }
+               log.info("exiting loop", { sessionID })
+               break
+             }
 
 diff --git a/packages/opencode/src/session/prompt/build-switch.txt b/packages/opencode/src/session/prompt/build-switch.txt
 index 3737b74d8..85546b176 100644
@@ -4541,10 +4727,10 @@ index 3737b74d8..85546b176 100644
  </system-reminder>
 
 diff --git a/packages/opencode/src/session/prompt/plan.txt b/packages/opencode/src/session/prompt/plan.txt
-index 1806e0eba..df6886f89 100644
+index 1806e0eba..a63102d82 100644
 --- a/packages/opencode/src/session/prompt/plan.txt
 +++ b/packages/opencode/src/session/prompt/plan.txt
-@@ -23,4 +23,39 @@ Ask the user clarifying questions or ask for their opinion when weighing tradeof
+@@ -23,4 +23,40 @@ Ask the user clarifying questions or ask for their opinion when weighing tradeof
  ## Important
  
  The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
@@ -4581,6 +4767,7 @@ index 1806e0eba..df6886f89 100644
 +- do NOT write it directly from the plan agent
 +- the runtime will invoke the `plan_user` subagent after your internal markdown plan is finalized
 +- do not call the task tool yourself for user-facing XML generation
++- do not call `plan_exit`; the user approves or revises the plan from the review UI after your turn ends
 +
 +If the task is too small to require full TDD, say so explicitly and provide the lightest valid plan instead of forcing ceremony.
  </system-reminder>
@@ -4647,14 +4834,13 @@ index 000000000..be9ef8930
 +</system-reminder>
 
 diff --git a/packages/opencode/src/tool/plan.ts b/packages/opencode/src/tool/plan.ts
-index e91bc3faa..2d252c893 100644
+index e91bc3faa..43967bcbd 100644
 --- a/packages/opencode/src/tool/plan.ts
 +++ b/packages/opencode/src/tool/plan.ts
-@@ -3,30 +3,44 @@ import path from "path"
- import { Tool } from "./tool"
+@@ -4,29 +4,48 @@ import { Tool } from "./tool"
  import { Question } from "../question"
  import { Session } from "../session"
--import { MessageV2 } from "../session/message-v2"
+ import { MessageV2 } from "../session/message-v2"
 -import { Provider } from "../provider/provider"
 +import { approvePlan } from "../session/plan-action"
 +import * as SessionPlanHtml from "../session/plan-html"
@@ -4678,7 +4864,11 @@ index e91bc3faa..2d252c893 100644
 +    let planView: string | undefined
 +
 +    try {
-+      const rendered = await SessionPlanHtml.renderExistingPlanArtifacts({ session })
++      const currentMessage = await MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).catch(() => undefined)
++      const assistantMarkdown = currentMessage?.info.role === "assistant" ? SessionPlanHtml.markdownFromParts(currentMessage.parts) : undefined
++      const rendered = assistantMarkdown && SessionPlanHtml.isPlanReadyForOpen(assistantMarkdown)
++        ? await SessionPlanHtml.renderPlanArtifacts({ session, markdown: assistantMarkdown })
++        : await SessionPlanHtml.renderExistingPlanArtifacts({ session })
 +      if (!rendered.ready) {
 +        throw new Error("The internal plan is not ready yet. Finalize the technical markdown plan before calling plan_exit.")
 +      }
@@ -4706,7 +4896,7 @@ index e91bc3faa..2d252c893 100644
            header: "Build Agent",
            custom: false,
            options: [
-@@ -41,27 +55,7 @@ export const PlanExitTool = Tool.define("plan_exit", {
+@@ -41,27 +60,7 @@ export const PlanExitTool = Tool.define("plan_exit", {
      const answer = answers[0]?.[0]
      if (answer === "No") throw new Question.RejectedError()
  

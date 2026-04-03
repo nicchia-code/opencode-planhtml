@@ -14,6 +14,7 @@
     "packages/app/src/pages/session-plan.tsx",
     "packages/opencode/package.json",
     "packages/opencode/src/agent/agent.ts",
+    "packages/opencode/src/cli/cmd/tui/routes/session/index.tsx",
     "packages/opencode/src/cli/cmd/tui/worker.ts",
     "packages/opencode/src/flag/flag.ts",
     "packages/opencode/src/server/instance.ts",
@@ -34,5 +35,5 @@
     "packages/opencode/test/session/plan-html.test.ts",
     "packages/opencode/test/session/plan-user.test.ts"
   ],
-  "generatedAt": "2026-04-03T08:24:30.831Z"
+  "generatedAt": "2026-04-03T09:16:02.579Z"
 }
