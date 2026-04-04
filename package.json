@@ -1,6 +1,6 @@
 {
   "name": "opencode-planhtml",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "packageManager": "bun@1.3.11",
   "description": "GitHub-installable OpenCode overlay that patches PLAN with HTML rendering and browser opening.",

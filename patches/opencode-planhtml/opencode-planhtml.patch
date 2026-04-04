@@ -1,5 +1,5 @@
 diff --git a/bun.lock b/bun.lock
-index 767cb6da2..e5e3beaf0 100644
+index 767cb6da2..75e4da3a3 100644
 --- a/bun.lock
 +++ b/bun.lock
 @@ -357,6 +357,7 @@
@@ -18,12 +18,15 @@ index 767cb6da2..e5e3beaf0 100644
          "mime-types": "3.0.2",
          "minimatch": "10.0.3",
          "open": "10.1.2",
-@@ -727,4 +728,4 @@
+@@ -725,7 +727,7 @@
+ 
+     "@ampproject/remapping": ["@ampproject/remapping@2.3.0", "", { "dependencies": { "@jridgewell/gen-mapping": "^0.3.5", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-30iZtAPgz+LTIYoeivqYo853f02jBYSd5uGnGpkFV0M3xOt9aN73erkgYAmZU43x4VfqcnLxW9Kpg3R5LC4YYw=="],
  
 -    "@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.71.2", "", { "dependencies": { "json-schema-to-ts": "^3.1.1" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["zod"], "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-TGNDEUuEstk/DKu0/TflXAEt+p+p/WhTlFzEnoosvbaDU2LTjm42igSdlL0VijrKpWejtOKxX0b8A7uc+XiSAQ=="],
 +    "@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.71.1", "", { "dependencies": { "json-schema-to-ts": "^3.1.1" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["zod"], "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-ViVzuaWMxHygfB2G6/1OufWDjbJGRl3duR0N1CEx/D5O9nv1yLNtbO3Lri5sQdF+aDHP+0nL6WyOMwCJUDicRQ=="],
  
      "@anycable/core": ["@anycable/core@0.9.2", "", { "dependencies": { "nanoevents": "^7.0.1" } }, "sha512-x5ZXDcW/N4cxWl93CnbHs/u7qq4793jS2kNPWm+duPrXlrva+ml2ZGT7X9tuOBKzyIHf60zWCdIK7TUgMPAwXA=="],
+ 
 @@ -2935,9 +2937,9 @@
  
      "fast-uri": ["fast-uri@3.1.0", "", {}, "sha512-iPeeDKJSWf4IEOasVVrknXpaBV0IApz/gp7S2bb7Z4Lljbl2MGJRqInZiUrQwV16cpzw/D3S5j5Julj/gT52AA=="],
@@ -1950,7 +1953,7 @@ index 000000000..90a091737
 +}
 
 diff --git a/packages/opencode/package.json b/packages/opencode/package.json
-index d97046ca9..4047fdeff 100644
+index d97046ca9..bf55da2b1 100644
 --- a/packages/opencode/package.json
 +++ b/packages/opencode/package.json
 @@ -121,6 +121,7 @@
@@ -1969,7 +1972,8 @@ index d97046ca9..4047fdeff 100644
      "mime-types": "3.0.2",
      "minimatch": "10.0.3",
      "open": "10.1.2",
-@@ -155,5 +157,6 @@
+@@ -154,6 +156,7 @@
+     "zod-to-json-schema": "3.24.5"
    },
    "overrides": {
 +    "@anthropic-ai/sdk": "0.71.1",
@@ -1978,10 +1982,39 @@ index d97046ca9..4047fdeff 100644
  }
 
 diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
-index 96b71f816..457b47907 100644
+index 96b71f816..d2bbb5da6 100644
 --- a/packages/opencode/src/agent/agent.ts
 +++ b/packages/opencode/src/agent/agent.ts
-@@ -127,7 +127,7 @@ export namespace Agent {
+@@ -119,6 +119,28 @@ export namespace Agent {
+               mode: "primary",
+               native: true,
+             },
++            ask: {
++              name: "ask",
++              description: "Analysis mode. Researches and answers directly without executing or drafting a plan artifact.",
++              options: {},
++              permission: Permission.merge(
++                defaults,
++                Permission.fromConfig({
++                  question: "allow",
++                  bash: "deny",
++                  write: "deny",
++                  apply_patch: "deny",
++                  task: "deny",
++                  todowrite: "deny",
++                  edit: {
++                    "*": "deny",
++                  },
++                }),
++                user,
++              ),
++              mode: "primary",
++              native: true,
++            },
+             plan: {
+               name: "plan",
+               description: "Plan mode. Disallows all edit tools.",
+@@ -127,7 +149,7 @@ export namespace Agent {
                  defaults,
                  Permission.fromConfig({
                    question: "allow",
@@ -1990,7 +2023,7 @@ index 96b71f816..457b47907 100644
                    external_directory: {
                      [path.join(Global.Path.data, "plans", "*")]: "allow",
                    },
-@@ -143,6 +143,29 @@ export namespace Agent {
+@@ -143,6 +165,29 @@ export namespace Agent {
                mode: "primary",
                native: true,
              },
@@ -2020,6 +2053,72 @@ index 96b71f816..457b47907 100644
              general: {
                name: "general",
                description: `General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel.`,
+@@ -294,6 +339,18 @@ export namespace Agent {
+           })
+ 
+           const defaultAgent = Effect.fnUntraced(function* () {
++            const fallbackPriority = (name: string) => {
++              switch (name) {
++                case "build":
++                  return 0
++                case "plan":
++                  return 1
++                case "ask":
++                  return 2
++                default:
++                  return 3
++              }
++            }
+             const c = yield* config.get()
+             if (c.default_agent) {
+               const agent = agents[c.default_agent]
+@@ -302,7 +359,9 @@ export namespace Agent {
+               if (agent.hidden === true) throw new Error(`default agent "${c.default_agent}" is hidden`)
+               return agent.name
+             }
+-            const visible = Object.values(agents).find((a) => a.mode !== "subagent" && a.hidden !== true)
++            const visible = Object.values(agents)
++              .filter((a) => a.mode !== "subagent" && a.hidden !== true)
++              .sort((a, b) => fallbackPriority(a.name) - fallbackPriority(b.name) || a.name.localeCompare(b.name))[0]
+             if (!visible) throw new Error("no primary visible agent found")
+             return visible.name
+           })
+
+diff --git a/packages/opencode/src/cli/cmd/tui/context/local.tsx b/packages/opencode/src/cli/cmd/tui/context/local.tsx
+index e131df358..57d5d7795 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/local.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/local.tsx
+@@ -14,6 +14,19 @@ import { useSDK } from "./sdk"
+ import { RGBA } from "@opentui/core"
+ import { Filesystem } from "@/util/filesystem"
+ 
++export function builtinTuiAgentColorHex(name: string) {
++  switch (name.toLowerCase()) {
++    case "ask":
++      return "#ef4444"
++    case "build":
++      return "#6366f1"
++    case "plan":
++      return "#f59e0b"
++    default:
++      return undefined
++  }
++}
++
+ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
+   name: "Local",
+   init: () => {
+@@ -88,6 +101,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
+             // already validated by config, just satisfying TS here
+             return theme[color as keyof typeof theme] as RGBA
+           }
++
++          const builtin = builtinTuiAgentColorHex(agent.name)
++          if (builtin) return RGBA.fromHex(builtin)
++
+           return colors()[index % colors().length]
+         },
+       }
 
 diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
 index fb62de9ac..088358589 100644
@@ -4620,18 +4719,20 @@ index 2482e40fb..05242c26f 100644
          const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
 
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 083c23cc6..98ff5f30a 100644
+index 083c23cc6..ed39c3245 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -18,6 +18,7 @@ import { SystemPrompt } from "./system"
+@@ -17,7 +17,9 @@ import { ProviderTransform } from "../provider/transform"
+ import { SystemPrompt } from "./system"
  import { InstructionPrompt } from "./instruction"
  import { Plugin } from "../plugin"
++import PROMPT_ASK from "../session/prompt/ask.txt"
  import PROMPT_PLAN from "../session/prompt/plan.txt"
 +import PROMPT_PLAN_USER from "../session/prompt/plan-user.txt"
  import BUILD_SWITCH from "../session/prompt/build-switch.txt"
  import MAX_STEPS from "../session/prompt/max-steps.txt"
  import { ToolRegistry } from "../tool/registry"
-@@ -45,6 +46,7 @@ import { AppFileSystem } from "@/filesystem"
+@@ -45,6 +47,7 @@ import { AppFileSystem } from "@/filesystem"
  import { Truncate } from "@/tool/truncate"
  import { decodeDataUrl } from "@/util/data-url"
  import { Process } from "@/util/process"
@@ -4639,7 +4740,7 @@ index 083c23cc6..98ff5f30a 100644
  import { Cause, Effect, Exit, Layer, Option, Scope, ServiceMap } from "effect"
  import { InstanceState } from "@/effect/instance-state"
  import { makeRuntime } from "@/effect/run-service"
-@@ -251,6 +253,8 @@ export namespace SessionPrompt {
+@@ -251,8 +254,20 @@ export namespace SessionPrompt {
        }) {
          const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
          if (!userMessage) return input.messages
@@ -4647,8 +4748,20 @@ index 083c23cc6..98ff5f30a 100644
 +        const planUser = Session.planUser(input.session)
  
          if (!Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) {
++          if (input.agent.name === "ask") {
++            userMessage.parts.push({
++              id: PartID.ascending(),
++              messageID: userMessage.info.id,
++              sessionID: userMessage.info.sessionID,
++              type: "text",
++              text: PROMPT_ASK,
++              synthetic: true,
++            })
++          }
            if (input.agent.name === "plan") {
-@@ -262,6 +266,50 @@ export namespace SessionPrompt {
+             userMessage.parts.push({
+               id: PartID.ascending(),
+@@ -262,9 +277,55 @@ export namespace SessionPrompt {
                text: PROMPT_PLAN,
                synthetic: true,
              })
@@ -4670,7 +4783,9 @@ index 083c23cc6..98ff5f30a 100644
 +</system-reminder>`,
 +              synthetic: true,
 +            })
-+          }
+           }
+-          const wasPlan = input.messages.some((msg) => msg.info.role === "assistant" && msg.info.agent === "plan")
+-          if (wasPlan && input.agent.name === "build") {
 +          if (input.agent.name === "plan_user") {
 +            userMessage.parts.push({
 +              id: PartID.ascending(),
@@ -4696,11 +4811,54 @@ index 083c23cc6..98ff5f30a 100644
 +</system-reminder>`,
 +              synthetic: true,
 +            })
-           }
-           const wasPlan = input.messages.some((msg) => msg.info.role === "assistant" && msg.info.agent === "plan")
-           if (wasPlan && input.agent.name === "build") {
-@@ -296,20 +344,23 @@ export namespace SessionPrompt {
++          }
++          const wasAnalysis = input.messages.some(
++            (msg) => msg.info.role === "assistant" && ["plan", "ask"].includes(msg.info.agent),
++          )
++          if (wasAnalysis && input.agent.name === "build") {
+             userMessage.parts.push({
+               id: PartID.ascending(),
+               messageID: userMessage.info.id,
+@@ -278,7 +339,7 @@ export namespace SessionPrompt {
+         }
  
+         const assistantMessage = input.messages.findLast((msg) => msg.info.role === "assistant")
+-        if (input.agent.name !== "plan" && assistantMessage?.info.agent === "plan") {
++        if (input.agent.name === "build" && assistantMessage?.info.agent === "plan") {
+           const plan = Session.plan(input.session)
+           if (!(yield* fsys.existsSafe(plan))) return input.messages
+           const part = yield* sessions.updatePart({
+@@ -294,22 +355,52 @@ export namespace SessionPrompt {
+           return input.messages
+         }
+ 
++        if (input.agent.name === "build" && assistantMessage?.info.agent === "ask") {
++          const part = yield* sessions.updatePart({
++            id: PartID.ascending(),
++            messageID: userMessage.info.id,
++            sessionID: userMessage.info.sessionID,
++            type: "text",
++            text: BUILD_SWITCH,
++            synthetic: true,
++          })
++          userMessage.parts.push(part)
++          return input.messages
++        }
++
++        if (input.agent.name === "ask") {
++          if (assistantMessage?.info.agent === "ask") return input.messages
++          const part = yield* sessions.updatePart({
++            id: PartID.ascending(),
++            messageID: userMessage.info.id,
++            sessionID: userMessage.info.sessionID,
++            type: "text",
++            text: PROMPT_ASK,
++            synthetic: true,
++          })
++          userMessage.parts.push(part)
++          return input.messages
++        }
++
          if (input.agent.name !== "plan" || assistantMessage?.info.agent === "plan") return input.messages
  
 -        const plan = Session.plan(input.session)
@@ -4728,7 +4886,7 @@ index 083c23cc6..98ff5f30a 100644
  
  ## Plan Workflow
  
-@@ -359,18 +410,61 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
+@@ -359,18 +450,61 @@ Goal: Review the plan(s) from Phase 2 and ensure alignment with the user's inten
  2. Ensure that the plans align with the user's original request
  3. Use question tool to clarify any remaining questions with the user
  
@@ -4748,9 +4906,13 @@ index 083c23cc6..98ff5f30a 100644
 +- Do not call the task tool yourself for user-facing XML generation
 +- The runtime will read ${plan}, invoke the dedicated \`plan_user\` subagent, and regenerate/update ${planUser}
 +- End plan mode only after you have produced the final internal markdown plan
-+
+ 
+-### Phase 5: Call plan_exit tool
+-At the very end of your turn, once you have asked the user questions and are happy with your final plan file - you should always call plan_exit to indicate to the user that you are done planning.
+-This is critical - your turn should only end with either asking the user a question or calling plan_exit. Do not stop unless it's for these 2 reasons.
 +## TDD Todo Contract
-+
+ 
+-**Important:** Use question tool to clarify requirements/approach, use plan_exit to request plan approval. Do NOT use question tool to ask "Is this plan okay?" - that's what plan_exit does.
 +Before finalizing the plan, you MUST call \`todowrite\`.
 +
 +For implementation work, the todo list MUST include explicit TDD-oriented steps when applicable:
@@ -4783,21 +4945,17 @@ index 083c23cc6..98ff5f30a 100644
 +- the runtime will generate/update it through the dedicated \`plan_user\` subagent after your internal plan is finalized
 +
 +If the task is too small to require full TDD, say so explicitly and provide the lightest valid plan instead of forcing ceremony.
- 
--### Phase 5: Call plan_exit tool
--At the very end of your turn, once you have asked the user questions and are happy with your final plan file - you should always call plan_exit to indicate to the user that you are done planning.
--This is critical - your turn should only end with either asking the user a question or calling plan_exit. Do not stop unless it's for these 2 reasons.
++
 +### Phase 5: Stop In Plan Mode
 +At the end of your turn, respond with the final internal markdown plan only.
 +Do not call plan_exit.
 +The runtime will open the review UI, and the user will approve or request revisions from there.
- 
--**Important:** Use question tool to clarify requirements/approach, use plan_exit to request plan approval. Do NOT use question tool to ask "Is this plan okay?" - that's what plan_exit does.
++
 +**Important:** Use question tool to clarify requirements or approach. Do not try to switch to build mode from the plan agent turn.
  
  NOTE: At any point in time through this workflow you should feel free to ask the user questions or clarifications. Don't make large assumptions about user intent. The goal is to present a well researched plan to the user, and tie any loose ends before implementation begins.
  </system-reminder>`,
-@@ -1331,6 +1425,32 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -1331,6 +1465,32 @@ NOTE: At any point in time through this workflow you should feel free to ask the
            throw new Error("Impossible")
          })
  
@@ -4830,7 +4988,7 @@ index 083c23cc6..98ff5f30a 100644
        const runLoop: (sessionID: SessionID) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.run")(
          function* (sessionID: SessionID) {
            const ctx = yield* InstanceState.context
-@@ -1346,12 +1466,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -1346,12 +1506,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
  
              let lastUser: MessageV2.User | undefined
              let lastAssistant: MessageV2.Assistant | undefined
@@ -4848,7 +5006,7 @@ index 083c23cc6..98ff5f30a 100644
                if (!lastFinished && msg.info.role === "assistant" && msg.info.finish) lastFinished = msg.info
                if (lastUser && lastFinished) break
                const task = msg.parts.filter((part) => part.type === "compaction" || part.type === "subtask")
-@@ -1364,6 +1488,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -1364,6 +1528,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                !["tool-calls"].includes(lastAssistant.finish) &&
                lastUser.id < lastAssistant.id
              ) {
@@ -4859,14 +5017,37 @@ index 083c23cc6..98ff5f30a 100644
                break
              }
 
+diff --git a/packages/opencode/src/session/prompt/ask.txt b/packages/opencode/src/session/prompt/ask.txt
+new file mode 100644
+index 000000000..29741bcc6
+--- /dev/null
++++ b/packages/opencode/src/session/prompt/ask.txt
+@@ -0,0 +1,16 @@
++<system-reminder>
++Ask mode is active.
++
++The user wants investigation and a direct answer, not execution and not a technical plan artifact.
++
++Important rules:
++- You MUST NOT make edits, run shell commands, or otherwise change the system.
++- Use only read-only investigation and the question tool when clarification is truly needed.
++- Do not create or update any internal plan file.
++- Do not create or update any user-facing review plan.
++- Do not call plan_exit.
++- Do not call todowrite unless the user explicitly asks for a todo list.
++- Respond directly in normal assistant prose instead of drafting a plan.
++
++If useful, include concrete recommendations, tradeoffs, and next steps in your direct answer.
++</system-reminder>
+
 diff --git a/packages/opencode/src/session/prompt/build-switch.txt b/packages/opencode/src/session/prompt/build-switch.txt
-index 3737b74d8..85546b176 100644
+index 3737b74d8..7da619d8a 100644
 --- a/packages/opencode/src/session/prompt/build-switch.txt
 +++ b/packages/opencode/src/session/prompt/build-switch.txt
 @@ -1,5 +1,6 @@
  <system-reminder>
 -Your operational mode has changed from plan to build.
-+Your operational mode has changed from planning to execution (the build agent).
++Your operational mode has changed from a non-executing analysis mode (such as plan or ask) to execution (the build agent).
 +This means implementation mode, not project compilation.
  You are no longer in read-only mode.
 -You are permitted to make file changes, run shell commands, and utilize your arsenal of tools as needed.
@@ -5072,6 +5253,86 @@ index e91bc3faa..43967bcbd 100644
  
      return {
        title: "Switching to build agent",
+
+diff --git a/packages/opencode/test/agent/agent.test.ts b/packages/opencode/test/agent/agent.test.ts
+index 98a0fd4c6..5594cbc70 100644
+--- a/packages/opencode/test/agent/agent.test.ts
++++ b/packages/opencode/test/agent/agent.test.ts
+@@ -22,6 +22,7 @@ test("returns default native agents when no config", async () => {
+     fn: async () => {
+       const agents = await Agent.list()
+       const names = agents.map((a) => a.name)
++      expect(names).toContain("ask")
+       expect(names).toContain("build")
+       expect(names).toContain("plan")
+       expect(names).toContain("general")
+@@ -33,6 +34,25 @@ test("returns default native agents when no config", async () => {
+   })
+ })
+ 
++test("ask agent stays in direct-answer read-only mode", async () => {
++  await using tmp = await tmpdir()
++  await Instance.provide({
++    directory: tmp.path,
++    fn: async () => {
++      const ask = await Agent.get("ask")
++      expect(ask).toBeDefined()
++      expect(ask?.mode).toBe("primary")
++      expect(ask?.native).toBe(true)
++      expect(evalPerm(ask, "question")).toBe("allow")
++      expect(evalPerm(ask, "bash")).toBe("deny")
++      expect(evalPerm(ask, "write")).toBe("deny")
++      expect(evalPerm(ask, "edit")).toBe("deny")
++      expect(evalPerm(ask, "task")).toBe("deny")
++      expect(evalPerm(ask, "todowrite")).toBe("deny")
++    },
++  })
++})
++
+ test("build agent has correct default properties", async () => {
+   await using tmp = await tmpdir()
+   await Instance.provide({
+@@ -704,13 +724,14 @@ test("defaultAgent throws when all primary agents are disabled", async () => {
+       agent: {
+         build: { disable: true },
+         plan: { disable: true },
++        ask: { disable: true },
+       },
+     },
+   })
+   await Instance.provide({
+     directory: tmp.path,
+     fn: async () => {
+-      // build and plan are disabled, no primary-capable agents remain
++      // build, plan, and ask are disabled, no primary-capable agents remain
+       await expect(Agent.defaultAgent()).rejects.toThrow("no primary visible agent found")
+     },
+   })
+
+diff --git a/packages/opencode/test/config/agent-color.test.ts b/packages/opencode/test/config/agent-color.test.ts
+index b9c7cccc4..af60d9dcf 100644
+--- a/packages/opencode/test/config/agent-color.test.ts
++++ b/packages/opencode/test/config/agent-color.test.ts
+@@ -6,6 +6,8 @@ import { Config } from "../../src/config/config"
+ import { Agent as AgentSvc } from "../../src/agent/agent"
+ import { Color } from "../../src/util/color"
+ 
++const { builtinTuiAgentColorHex } = await import("../../src/cli/cmd/tui/context/local")
++
+ test("agent color parsed from project config", async () => {
+   await using tmp = await tmpdir({
+     init: async (dir) => {
+@@ -69,3 +71,10 @@ test("Color.hexToAnsiBold returns undefined for invalid hex", () => {
+   expect(Color.hexToAnsiBold("FFA500")).toBeUndefined()
+   expect(Color.hexToAnsiBold("#GGGGGG")).toBeUndefined()
+ })
++
++test("built-in TUI agent colors keep build and plan stable and make ask red", () => {
++  expect(builtinTuiAgentColorHex("build")).toBe("#6366f1")
++  expect(builtinTuiAgentColorHex("plan")).toBe("#f59e0b")
++  expect(builtinTuiAgentColorHex("ask")).toBe("#ef4444")
++  expect(builtinTuiAgentColorHex("general")).toBeUndefined()
++})
 
 diff --git a/packages/opencode/test/server/session-plan.test.ts b/packages/opencode/test/server/session-plan.test.ts
 new file mode 100644
@@ -6015,6 +6276,89 @@ index 000000000..cc870c47f
 +    })
 +  })
 +})
+
+diff --git a/packages/opencode/test/session/prompt-effect.test.ts b/packages/opencode/test/session/prompt-effect.test.ts
+index 98111bb3a..7a57f7493 100644
+--- a/packages/opencode/test/session/prompt-effect.test.ts
++++ b/packages/opencode/test/session/prompt-effect.test.ts
+@@ -418,6 +418,77 @@ it.live("static loop consumes queued replies across turns", () =>
+   ),
+ )
+ 
++it.live("ask mode replies directly without generating plan artifacts", () =>
++  provideTmpdirServer(
++    Effect.fnUntraced(function* ({ llm }) {
++      const sessions = yield* Session.Service
++      const session = yield* sessions.create({ title: "Ask mode" })
++
++      yield* Effect.promise(() =>
++        SessionPrompt.prompt({
++          sessionID: session.id,
++          agent: "ask",
++          noReply: true,
++          parts: [{ type: "text", text: "Explain the current implementation tradeoffs." }],
++        }),
++      )
++
++      yield* llm.text("Focus on the runtime prompt path and the session processor handoff.")
++
++      const result = yield* Effect.promise(() => SessionPrompt.loop({ sessionID: session.id }))
++      expect(result.info.role).toBe("assistant")
++      expect(
++        result.parts.some(
++          (part) => part.type === "text" && part.text === "Focus on the runtime prompt path and the session processor handoff.",
++        ),
++      ).toBe(true)
++
++      expect(yield* Effect.promise(() => Bun.file(Session.plan(session)).exists())).toBe(false)
++      expect(yield* Effect.promise(() => Bun.file(Session.planUser(session)).exists())).toBe(false)
++    }),
++    { git: true, config: providerCfg },
++  ),
++)
++
++it.live("build after ask gets the execution switch reminder without a plan-file handoff", () =>
++  provideTmpdirServer(
++    Effect.fnUntraced(function* ({ llm }) {
++      const sessions = yield* Session.Service
++      const session = yield* sessions.create({ title: "Ask to build" })
++
++      yield* Effect.promise(() =>
++        SessionPrompt.prompt({
++          sessionID: session.id,
++          agent: "ask",
++          noReply: true,
++          parts: [{ type: "text", text: "Review the implementation approach." }],
++        }),
++      )
++      yield* llm.text("Start with the prompt and processor integration points.")
++      yield* Effect.promise(() => SessionPrompt.loop({ sessionID: session.id }))
++
++      yield* llm.text("Implement the runtime changes.")
++
++      yield* Effect.promise(() =>
++        SessionPrompt.prompt({
++          sessionID: session.id,
++          agent: "build",
++          noReply: true,
++          parts: [{ type: "text", text: "Implement it." }],
++        }),
++      )
++      yield* Effect.promise(() => SessionPrompt.loop({ sessionID: session.id }))
++
++      const inputs = yield* llm.inputs
++      const lastMessages = JSON.stringify(inputs.at(-1)?.messages ?? [])
++
++      expect(lastMessages).toContain("Your operational mode has changed")
++      expect(lastMessages).not.toContain("plan file exists")
++    }),
++    { git: true, config: providerCfg },
++  ),
++)
++
+ it.live("loop continues when finish is tool-calls", () =>
+   provideTmpdirServer(
+     Effect.fnUntraced(function* ({ llm }) {
 
 diff --git a/packages/opencode/test/session/plan-user.test.ts b/packages/opencode/test/session/plan-user.test.ts
 new file mode 100644
