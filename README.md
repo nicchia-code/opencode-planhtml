@@ -1,14 +1,15 @@
 # OpenCode Plan HTML
 
 ```bash
-bunx github:nicchia-code/opencode-planhtml#07c0163f1b9cf05affde519b05b52febcd3c0497 --link-name opencode-dev
+bunx github:nicchia-code/opencode-planhtml#57db05a838d122b851232cd32aa8c6e595dd3a99 --link-name opencode-dev
 ```
 
-This repo packages a source overlay for OpenCode that upgrades the native `plan` agent.
+This repo packages a source overlay for OpenCode that upgrades the native planning flow and adds a matching `ask` mode.
 
-It does four things:
+It does five things:
 
 - patches the PLAN prompt toward structured TDD planning
+- adds an ASK mode that stays read-only and answers directly without generating plan artifacts
 - renders the final plan to an HTML artifact
 - opens that HTML plan in the browser when the plan is actually ready
 - keeps the overlay installable directly from GitHub with Bun
