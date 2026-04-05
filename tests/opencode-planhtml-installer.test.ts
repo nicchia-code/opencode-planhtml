@@ -1,20 +1,28 @@
-import fs from "node:fs/promises"
-import { fileURLToPath } from "node:url"
-
+import {
+  applyManagedAgentConfig,
+  builtBinaryRelativePath,
+  defaultPaths,
+  managedAskAgentConfig,
+  parseCliArgs,
+  restoreManagedAgentConfig,
+} from "../src/opencode-planhtml/installer.mjs"
 import { describe, expect, it } from "vitest"
 
-import { builtBinaryRelativePath, defaultPaths, parseCliArgs } from "../src/opencode-planhtml/installer.mjs"
-
-const manifestPath = fileURLToPath(new URL("../patches/opencode-planhtml/manifest.json", import.meta.url))
-const patchPath = fileURLToPath(new URL("../patches/opencode-planhtml/opencode-planhtml.patch", import.meta.url))
-
-describe("opencode plan HTML installer helpers", () => {
+describe("opencode plan agents installer helpers", () => {
   it("computes stable default directories", () => {
-    const paths = defaultPaths({ XDG_DATA_HOME: "/tmp/data", XDG_STATE_HOME: "/tmp/state" }, "/tmp/home")
+    const paths = defaultPaths(
+      {
+        XDG_DATA_HOME: "/tmp/data",
+        XDG_STATE_HOME: "/tmp/state",
+        XDG_CONFIG_HOME: "/tmp/config",
+      },
+      "/tmp/home",
+    )
 
     expect(paths.binDir).toBe("/tmp/home/.local/bin")
-    expect(paths.sourceDir).toBe("/tmp/data/opencode-planhtml/source")
-    expect(paths.stateDir).toBe("/tmp/state/opencode-planhtml")
+    expect(paths.sourceDir).toBe("/tmp/data/opencode-plan-agents/source")
+    expect(paths.stateDir).toBe("/tmp/state/opencode-plan-agents")
+    expect(paths.configDir).toBe("/tmp/config/opencode")
   })
 
   it("computes the single-target binary path for the current platform shape", () => {
@@ -23,10 +31,11 @@ describe("opencode plan HTML installer helpers", () => {
   })
 
   it("parses install args with install as the default command", () => {
-    const parsed = parseCliArgs(["--link-name", "opencode-dev", "--dry-run"])
+    const parsed = parseCliArgs(["--link-name", "opencode-dev", "--config-only", "--dry-run"])
 
     expect(parsed.command).toBe("install")
     expect(parsed.linkName).toBe("opencode-dev")
+    expect(parsed.configOnly).toBe(true)
     expect(parsed.dryRun).toBe(true)
   })
 
@@ -38,33 +47,69 @@ describe("opencode plan HTML installer helpers", () => {
   })
 
   it("parses explicit subcommands", () => {
-    const parsed = parseCliArgs(["uninstall", "--purge", "--bin-dir", "/tmp/bin"])
+    const parsed = parseCliArgs(["uninstall", "--purge", "--state-dir", "/tmp/state"])
 
     expect(parsed.command).toBe("uninstall")
     expect(parsed.purge).toBe(true)
-    expect(parsed.binDir).toBe("/tmp/bin")
+    expect(parsed.stateDir).toBe("/tmp/state")
   })
 
-  it("keeps manifest files in sync with the exported patch", async () => {
-    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8")) as { files: string[] }
-    const patch = await fs.readFile(patchPath, "utf8")
-    const patchedFiles = Array.from(
-      new Set(
-        Array.from(patch.matchAll(/^diff --git a\/(.+?) b\//gm), (match) => match[1]),
-      ),
-    ).sort()
+  it("installs managed ASK and PLAN config while preserving unrelated values", () => {
+    const next = applyManagedAgentConfig({
+      model: "anthropic/claude-sonnet-4-20250514",
+      agent: {
+        plan: {
+          model: "anthropic/claude-haiku-4-20250514",
+        },
+        build: {
+          color: "primary",
+        },
+      },
+    })
 
-    expect(manifest.files.slice().sort()).toEqual(patchedFiles)
+    expect(next.$schema).toBe("https://opencode.ai/config.json")
+    expect(next.agent.build).toEqual({ color: "primary" })
+    expect(next.agent.plan).toEqual({
+      model: "anthropic/claude-haiku-4-20250514",
+      prompt: "{file:./prompts/opencode-plan-agents/plan.txt}",
+    })
+    expect(next.agent.ask).toEqual(managedAskAgentConfig())
   })
 
-  it("uses the supported Effect catch helper in the processor patch", async () => {
-    const patch = await fs.readFile(patchPath, "utf8")
-    const processorSection =
-      patch.match(
-        /^diff --git a\/packages\/opencode\/src\/session\/processor\.ts b\/packages\/opencode\/src\/session\/processor\.ts[\s\S]*?(?=^diff --git |\Z)/m,
-      )?.[0] ?? ""
+  it("restores previous plan and ask config on uninstall", () => {
+    const restored = restoreManagedAgentConfig(
+      applyManagedAgentConfig({
+        agent: {
+          plan: { model: "before" },
+          ask: { model: "custom-before" },
+        },
+      }),
+      {
+        configExistedBefore: true,
+        previousPlanAgent: { model: "before" },
+        previousAskAgent: { model: "custom-before" },
+      },
+    )
 
-    expect(processorSection).toContain("Effect.catch(")
-    expect(processorSection).not.toContain("Effect.catchAll(")
+    expect(restored).toEqual({
+      $schema: "https://opencode.ai/config.json",
+      agent: {
+        plan: { model: "before" },
+        ask: { model: "custom-before" },
+      },
+    })
+  })
+
+  it("removes the config file entirely when the installer created it", () => {
+    const restored = restoreManagedAgentConfig(
+      applyManagedAgentConfig({}),
+      {
+        configExistedBefore: false,
+        previousPlanAgent: undefined,
+        previousAskAgent: undefined,
+      },
+    )
+
+    expect(restored).toBeUndefined()
   })
 })
